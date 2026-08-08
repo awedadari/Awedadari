@@ -1066,6 +1066,30 @@ class DatabaseService {
       });
     }
 
+    try {
+      const token = await auth.currentUser?.getIdToken();
+      const currentUid = auth.currentUser?.uid;
+      const res = await fetch('/api/financial/confirm-payment', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+          ...(currentUid ? { 'x-user-id': currentUid } : {}),
+        },
+        body: JSON.stringify({
+          tournamentId,
+          userId,
+          paymentStatus,
+          idempotencyKey: `confirm_${tournamentId}_${userId}_${paymentStatus}`,
+        }),
+      });
+      if (res.ok) {
+        return;
+      }
+    } catch (err) {
+      console.warn('Server payment confirmation failed, using fallback:', err);
+    }
+
     await setDoc(
       playerRef,
       {
@@ -3030,12 +3054,93 @@ class DatabaseService {
       status: 'Pending Approval',
       requestedAt: new Date().toISOString(),
     };
+
+    try {
+      const token = await auth.currentUser?.getIdToken();
+      const currentUid = auth.currentUser?.uid;
+      const res = await fetch('/api/financial/withdraw', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+          ...(currentUid ? { 'x-user-id': currentUid } : {}),
+        },
+        body: JSON.stringify({
+          ...data,
+          idempotencyKey: `withdraw_${data.organizerId}_${data.amount}_${Math.floor(Date.now() / 60000)}`,
+        }),
+      });
+      if (res.ok) {
+        const json = await res.json();
+        if (json.request) {
+          const reqFromApi: WithdrawalRequest = {
+            id: json.request.id,
+            organizerId: json.request.organizerId,
+            organizerName: json.request.organizerName,
+            amount: json.request.amount,
+            telebirrName: json.request.telebirrName || '',
+            telebirrNumber: json.request.telebirrNumber || '',
+            reason: json.request.reason || '',
+            status: json.request.status || 'Pending Approval',
+            requestedAt: json.request.requestedAt || new Date().toISOString(),
+          };
+          const idx = this.withdrawalRequests.findIndex((r) => r.id === reqFromApi.id);
+          if (idx >= 0) {
+            this.withdrawalRequests[idx] = reqFromApi;
+          } else {
+            this.withdrawalRequests.push(reqFromApi);
+          }
+          this.notify();
+          return reqFromApi;
+        }
+      }
+    } catch (err) {
+      console.warn('Server withdrawal request creation failed, using fallback:', err);
+    }
+
     const docRef = doc(firestore, 'withdrawalRequests', id);
     await setDoc(docRef, newReq);
+    const idx = this.withdrawalRequests.findIndex((r) => r.id === id);
+    if (idx >= 0) {
+      this.withdrawalRequests[idx] = newReq;
+    } else {
+      this.withdrawalRequests.push(newReq);
+    }
+    this.notify();
     return newReq;
   }
 
   public async approveWithdrawalRequest(requestId: string): Promise<void> {
+    const reqObj = this.withdrawalRequests.find((r) => r.id === requestId);
+    if (reqObj) {
+      reqObj.status = 'Paid';
+      reqObj.processedAt = new Date().toISOString();
+      this.notify();
+    }
+
+    try {
+      const token = await auth.currentUser?.getIdToken();
+      const currentUid = auth.currentUser?.uid;
+      const res = await fetch('/api/financial/process-withdrawal', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+          ...(currentUid ? { 'x-user-id': currentUid } : {}),
+        },
+        body: JSON.stringify({
+          requestId,
+          status: 'Paid',
+          idempotencyKey: `process_w_${requestId}_Paid`,
+        }),
+      });
+      if (res.ok) {
+        return;
+      }
+    } catch (err) {
+      console.warn('Server withdrawal approval failed, using fallback:', err);
+    }
+
     const docRef = doc(firestore, 'withdrawalRequests', requestId);
     await updateDoc(docRef, {
       status: 'Paid',
@@ -3044,6 +3149,36 @@ class DatabaseService {
   }
 
   public async rejectWithdrawalRequest(requestId: string): Promise<void> {
+    const reqObj = this.withdrawalRequests.find((r) => r.id === requestId);
+    if (reqObj) {
+      reqObj.status = 'Rejected';
+      reqObj.processedAt = new Date().toISOString();
+      this.notify();
+    }
+
+    try {
+      const token = await auth.currentUser?.getIdToken();
+      const currentUid = auth.currentUser?.uid;
+      const res = await fetch('/api/financial/process-withdrawal', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+          ...(currentUid ? { 'x-user-id': currentUid } : {}),
+        },
+        body: JSON.stringify({
+          requestId,
+          status: 'Rejected',
+          idempotencyKey: `process_w_${requestId}_Rejected`,
+        }),
+      });
+      if (res.ok) {
+        return;
+      }
+    } catch (err) {
+      console.warn('Server withdrawal rejection failed, using fallback:', err);
+    }
+
     const docRef = doc(firestore, 'withdrawalRequests', requestId);
     await updateDoc(docRef, {
       status: 'Rejected',

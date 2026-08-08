@@ -1,74 +1,247 @@
 rules_version = '2';
 
 service cloud.firestore {
-
   match /databases/{database}/documents {
 
+    // Global default-deny rule
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // HELPER FUNCTIONS
     function isAuthenticated() {
       return request.auth != null;
     }
 
-    // USERS
+    function isAdmin() {
+      return isAuthenticated() && (
+        (exists(/databases/$(database)/documents/users/admin_1) &&
+         get(/databases/$(database)/documents/users/admin_1).data.firebaseAuthUid == request.auth.uid) ||
+        (exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
+         get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'ADMIN') ||
+        (exists(/databases/$(database)/documents/users/$('user_' + request.auth.uid)) &&
+         get(/databases/$(database)/documents/users/$('user_' + request.auth.uid)).data.role == 'ADMIN')
+      );
+    }
+
+    function isUser(userId) {
+      return isAuthenticated() && (
+        request.auth.uid == userId ||
+        ('user_' + request.auth.uid) == userId ||
+        request.auth.uid == ('user_' + userId)
+      );
+    }
+
+    function isTournamentOrganizer(tournamentId) {
+      return isAuthenticated() && (
+        isAdmin() ||
+        (
+          exists(/databases/$(database)/documents/tournaments/$(tournamentId)) &&
+          (
+            get(/databases/$(database)/documents/tournaments/$(tournamentId)).data.organizerId == request.auth.uid ||
+            get(/databases/$(database)/documents/tournaments/$(tournamentId)).data.organizerId == ('user_' + request.auth.uid) ||
+            get(/databases/$(database)/documents/tournaments/$(tournamentId)).data.organizerId == ('tg_' + request.auth.uid)
+          )
+        )
+      );
+    }
+
+    // 1. USERS COLLECTION
     match /users/{userId} {
       allow read: if true;
-      allow create, update, delete: if isAuthenticated();
+      allow create: if isAuthenticated() && (
+        isAdmin() ||
+        (
+          isUser(userId) &&
+          (!('role' in request.resource.data.keys()) || request.resource.data.role == 'PLAYER') &&
+          (!('isApproved' in request.resource.data.keys()) || request.resource.data.isApproved == false) &&
+          (!('walletBalance' in request.resource.data.keys()) || request.resource.data.walletBalance == 0) &&
+          (!('organizerRequestStatus' in request.resource.data.keys()) || request.resource.data.organizerRequestStatus == 'none' || request.resource.data.organizerRequestStatus == 'pending')
+        )
+      );
+      allow update: if isAuthenticated() && (
+        isAdmin() ||
+        (
+          isUser(userId) &&
+          !request.resource.data.diff(resource.data).affectedKeys().hasAny([
+            'role',
+            'isApproved',
+            'walletBalance',
+            'firebaseAuthUid',
+            'telegramUserId',
+            'telegramId',
+            'organizerRequestStatus'
+          ])
+        )
+      );
+      allow delete: if isAdmin();
     }
 
-    // APPROVED ORGANIZERS
+    // 2. APPROVED ORGANIZERS COLLECTION
     match /approvedOrganizers/{orgId} {
       allow read: if true;
-      allow write: if isAuthenticated();
+      allow write: if isAdmin();
     }
 
-    // ORGANIZER REQUESTS
+    // 3. ORGANIZER REQUESTS COLLECTION
     match /organizerRequests/{requestId} {
       allow read: if true;
-      allow create, update, delete: if isAuthenticated();
+      allow create: if isAuthenticated() && (
+        isAdmin() ||
+        (
+          request.resource.data.userId == request.auth.uid ||
+          request.resource.data.userId == ('user_' + request.auth.uid)
+        )
+      );
+      allow update: if isAuthenticated() && (
+        isAdmin() ||
+        (
+          (resource.data.userId == request.auth.uid || resource.data.userId == ('user_' + request.auth.uid)) &&
+          !request.resource.data.diff(resource.data).affectedKeys().hasAny(['status'])
+        )
+      );
+      allow delete: if isAdmin() || (
+        isAuthenticated() &&
+        (resource.data.userId == request.auth.uid || resource.data.userId == ('user_' + request.auth.uid))
+      );
     }
 
-    // TOURNAMENTS
+    // 4. TOURNAMENTS COLLECTION
     match /tournaments/{tournamentId} {
       allow read: if true;
-      allow create, update, delete: if isAuthenticated();
+      allow create: if isAuthenticated() && (
+        isAdmin() ||
+        (
+          (request.resource.data.organizerId == request.auth.uid || request.resource.data.organizerId == ('user_' + request.auth.uid)) &&
+          (!('isApproved' in request.resource.data.keys()) || request.resource.data.isApproved == false || isAdmin())
+        )
+      );
+      allow update: if isAuthenticated() && (
+        isAdmin() ||
+        (
+          (resource.data.organizerId == request.auth.uid || resource.data.organizerId == ('user_' + request.auth.uid)) &&
+          // Cannot transfer tournament ownership
+          request.resource.data.organizerId == resource.data.organizerId &&
+          // Cannot self-approve tournament
+          (resource.data.isApproved == true || request.resource.data.isApproved == false) &&
+          // If approved, organizer cannot modify payment destination details
+          (
+            resource.data.isApproved == false ||
+            !request.resource.data.diff(resource.data).affectedKeys().hasAny(['telebirrName', 'telebirrAccountName', 'telebirrNumber'])
+          )
+        )
+      );
+      allow delete: if isAdmin() || (
+        isAuthenticated() &&
+        (resource.data.organizerId == request.auth.uid || resource.data.organizerId == ('user_' + request.auth.uid))
+      );
     }
 
-    // TOURNAMENT PLAYERS
+    // 5. TOURNAMENT PLAYERS COLLECTION
     match /tournamentPlayers/{docId} {
       allow read: if true;
-      allow create, update, delete: if isAuthenticated();
+      allow create: if isAuthenticated() && (
+        isAdmin() ||
+        isTournamentOrganizer(request.resource.data.tournamentId) ||
+        (
+          (request.resource.data.userId == request.auth.uid || request.resource.data.userId == ('user_' + request.auth.uid)) &&
+          (
+            !('paymentStatus' in request.resource.data.keys()) ||
+            request.resource.data.paymentStatus == 'PENDING_APPROVAL' ||
+            request.resource.data.paymentStatus == 'UNPAID'
+          ) &&
+          (!('playerStatus' in request.resource.data.keys()) || request.resource.data.playerStatus == 'Registered') &&
+          (!('status' in request.resource.data.keys()) || request.resource.data.status == 'Registered')
+        )
+      );
+      allow update: if isAuthenticated() && (
+        isAdmin() ||
+        isTournamentOrganizer(resource.data.tournamentId) ||
+        (
+          (resource.data.userId == request.auth.uid || resource.data.userId == ('user_' + request.auth.uid)) &&
+          // Player cannot modify payment status or check-in status directly
+          !request.resource.data.diff(resource.data).affectedKeys().hasAny(['paymentStatus', 'isCheckedIn', 'playerStatus', 'status'])
+        )
+      );
+      allow delete: if isAuthenticated() && (
+        isAdmin() ||
+        isTournamentOrganizer(resource.data.tournamentId) ||
+        (resource.data.userId == request.auth.uid || resource.data.userId == ('user_' + request.auth.uid))
+      );
     }
 
-    // MATCHES
+    // 6. MATCHES COLLECTION
     match /matches/{matchId} {
       allow read: if true;
-      allow create, update, delete: if isAuthenticated();
+      allow create: if isAuthenticated() && (
+        isAdmin() || isTournamentOrganizer(request.resource.data.tournamentId)
+      );
+      allow update: if isAuthenticated() && (
+        isAdmin() || isTournamentOrganizer(resource.data.tournamentId)
+      );
+      allow delete: if isAuthenticated() && (
+        isAdmin() || isTournamentOrganizer(resource.data.tournamentId)
+      );
     }
 
-    // TOURNAMENT GROUPS
+    // 7. TOURNAMENT GROUPS COLLECTION
     match /tournamentGroups/{groupId} {
       allow read: if true;
-      allow create, update, delete: if isAuthenticated();
+      allow create: if isAuthenticated() && (
+        isAdmin() || isTournamentOrganizer(request.resource.data.tournamentId)
+      );
+      allow update: if isAuthenticated() && (
+        isAdmin() || isTournamentOrganizer(request.resource.data.tournamentId)
+      );
+      allow delete: if isAuthenticated() && (
+        isAdmin() || isTournamentOrganizer(request.resource.data.tournamentId)
+      );
     }
 
-    // TOURNAMENT SESSIONS
+    // 8. TOURNAMENT SESSIONS COLLECTION
     match /tournamentSessions/{sessionId} {
       allow read: if true;
-      allow create, update, delete: if isAuthenticated();
+      allow create: if isAuthenticated() && (
+        isAdmin() || isTournamentOrganizer(request.resource.data.tournamentId)
+      );
+      allow update: if isAuthenticated() && (
+        isAdmin() || isTournamentOrganizer(request.resource.data.tournamentId)
+      );
+      allow delete: if isAuthenticated() && (
+        isAdmin() || isTournamentOrganizer(request.resource.data.tournamentId)
+      );
     }
 
-    // ROUND SCORES
+    // 9. ROUND SCORES COLLECTION
     match /roundScores/{scoreId} {
       allow read: if true;
-      allow create, update, delete: if isAuthenticated();
+      allow create: if isAuthenticated() && (
+        isAdmin() || isTournamentOrganizer(request.resource.data.tournamentId)
+      );
+      allow update: if isAuthenticated() && (
+        isAdmin() || isTournamentOrganizer(request.resource.data.tournamentId)
+      );
+      allow delete: if isAuthenticated() && (
+        isAdmin() || isTournamentOrganizer(request.resource.data.tournamentId)
+      );
     }
 
-    // WITHDRAWAL REQUESTS
+    // 10. WITHDRAWAL REQUESTS COLLECTION
     match /withdrawalRequests/{requestId} {
-      allow read: if true;
-      allow create, update, delete: if isAuthenticated();
+      allow read: if isAuthenticated() && (
+        isAdmin() ||
+        resource.data.organizerId == request.auth.uid ||
+        resource.data.organizerId == ('user_' + request.auth.uid)
+      );
+      allow create: if isAuthenticated() && (
+        isAdmin() ||
+        (
+          (request.resource.data.organizerId == request.auth.uid || request.resource.data.organizerId == ('user_' + request.auth.uid)) &&
+          (!('status' in request.resource.data.keys()) || request.resource.data.status == 'Pending Approval')
+        )
+      );
+      allow update: if isAdmin();
+      allow delete: if isAdmin();
     }
   }
 }
-
-
-
