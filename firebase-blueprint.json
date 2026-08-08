@@ -1,0 +1,179 @@
+{
+  "entities": {
+    "User": {
+      "title": "User",
+      "description": "User profile with role and contact information",
+      "type": "object",
+      "properties": {
+        "name": { "type": "string" },
+        "username": { "type": "string" },
+        "role": { "type": "string", "enum": ["PLAYER", "ORGANIZER", "ADMIN"] },
+        "gamertag": { "type": "string" },
+        "phoneNumber": { "type": "string" },
+        "bio": { "type": "string" },
+        "favGame": { "type": "string" },
+        "organizerRequestStatus": { "type": "string", "enum": ["none", "pending", "approved", "rejected"] },
+        "organizerRequestReason": { "type": "string" },
+        "rating": { "type": "number" },
+        "ratingCount": { "type": "number" }
+      },
+      "required": ["role"]
+    },
+    "OrganizerRequest": {
+      "title": "OrganizerRequest",
+      "description": "Application request from a player to become an organizer",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "userName": { "type": "string" },
+        "username": { "type": "string" },
+        "telegramUserId": { "type": "string" },
+        "reason": { "type": "string" },
+        "status": { "type": "string", "enum": ["pending", "approved", "rejected"] },
+        "requestedAt": { "type": "string" }
+      },
+      "required": ["userId", "status"]
+    },
+    "Tournament": {
+      "title": "Tournament",
+      "description": "eSports Tournament configuration and status",
+      "type": "object",
+      "properties": {
+        "tournamentName": { "type": "string" },
+        "game": { "type": "string" },
+        "image": { "type": "string" },
+        "date": { "type": "string" },
+        "time": { "type": "string" },
+        "maxPlayers": { "type": "number" },
+        "status": { "type": "string" },
+        "organizerId": { "type": "string" },
+        "venueName": { "type": "string" },
+        "rules": { "type": "string" },
+        "format": { "type": "string" },
+        "isApproved": { "type": "boolean" },
+        "registrationFee": { "type": "string" },
+        "prizePool": { "type": "string" }
+      },
+      "required": ["organizerId"]
+    },
+    "TournamentPlayer": {
+      "title": "TournamentPlayer",
+      "description": "Player registration for a specific tournament",
+      "type": "object",
+      "properties": {
+        "tournamentId": { "type": "string" },
+        "userId": { "type": "string" },
+        "paymentProofUrl": { "type": "string" },
+        "paymentStatus": { "type": "string", "enum": ["PENDING", "CONFIRMED", "REJECTED"] },
+        "isCheckedIn": { "type": "boolean" }
+      },
+      "required": ["tournamentId", "userId"]
+    },
+    "Match": {
+      "title": "Match",
+      "description": "Match pairing between players",
+      "type": "object",
+      "properties": {
+        "tournamentId": { "type": "string" },
+        "player1Id": { "type": "string" },
+        "player2Id": { "type": "string" },
+        "player1Score": { "type": "number" },
+        "player2Score": { "type": "number" },
+        "status": { "type": "string" },
+        "winnerId": { "type": "string" }
+      },
+      "required": ["tournamentId"]
+    },
+    "ApprovedOrganizer": {
+      "title": "ApprovedOrganizer",
+      "description": "Verified organizer authorization record",
+      "type": "object",
+      "properties": {
+        "approved": { "type": "boolean" },
+        "approvedAt": { "type": "string" }
+      }
+    },
+    "TournamentGroup": {
+      "title": "TournamentGroup",
+      "description": "Group stage division for tournaments",
+      "type": "object",
+      "properties": {
+        "tournamentId": { "type": "string" },
+        "name": { "type": "string" }
+      }
+    },
+    "TournamentSession": {
+      "title": "TournamentSession",
+      "description": "Leaderboard / Swiss session round for tournaments",
+      "type": "object",
+      "properties": {
+        "tournamentId": { "type": "string" },
+        "name": { "type": "string" }
+      }
+    },
+    "RoundScore": {
+      "title": "RoundScore",
+      "description": "Participant score for a specific round/session",
+      "type": "object",
+      "properties": {
+        "tournamentId": { "type": "string" },
+        "userId": { "type": "string" },
+        "score": { "type": "number" }
+      }
+    },
+    "WithdrawalRequest": {
+      "title": "WithdrawalRequest",
+      "description": "Payout withdrawal request by an organizer",
+      "type": "object",
+      "properties": {
+        "organizerId": { "type": "string" },
+        "amount": { "type": "number" },
+        "status": { "type": "string", "enum": ["PENDING", "APPROVED", "COMPLETED", "REJECTED"] },
+        "requestedAt": { "type": "string" }
+      },
+      "required": ["organizerId", "amount", "status"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": { "$ref": "#/entities/User" },
+      "description": "User profile collection"
+    },
+    "/organizerRequests/{requestId}": {
+      "schema": { "$ref": "#/entities/OrganizerRequest" },
+      "description": "Organizer application requests"
+    },
+    "/tournaments/{tournamentId}": {
+      "schema": { "$ref": "#/entities/Tournament" },
+      "description": "Tournaments collection"
+    },
+    "/tournamentPlayers/{docId}": {
+      "schema": { "$ref": "#/entities/TournamentPlayer" },
+      "description": "Tournament player registrations"
+    },
+    "/matches/{matchId}": {
+      "schema": { "$ref": "#/entities/Match" },
+      "description": "Matches collection"
+    },
+    "/approvedOrganizers/{orgId}": {
+      "schema": { "$ref": "#/entities/ApprovedOrganizer" },
+      "description": "Approved organizers list"
+    },
+    "/tournamentGroups/{groupId}": {
+      "schema": { "$ref": "#/entities/TournamentGroup" },
+      "description": "Tournament group divisions"
+    },
+    "/tournamentSessions/{sessionId}": {
+      "schema": { "$ref": "#/entities/TournamentSession" },
+      "description": "Tournament leaderboard/swiss sessions"
+    },
+    "/roundScores/{scoreId}": {
+      "schema": { "$ref": "#/entities/RoundScore" },
+      "description": "Round scores for tournament sessions"
+    },
+    "/withdrawalRequests/{requestId}": {
+      "schema": { "$ref": "#/entities/WithdrawalRequest" },
+      "description": "Organizer payout withdrawal requests"
+    }
+  }
+}

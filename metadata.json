@@ -1,0 +1,6 @@
+{
+  "name": "Tournament Center",
+  "description": "Mobile-first Telegram Mini App foundation for 1v1 esports venues, supporting Player and Organizer roles, tournament rosters, and match management.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

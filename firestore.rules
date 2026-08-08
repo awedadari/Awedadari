@@ -1,0 +1,74 @@
+rules_version = '2';
+
+service cloud.firestore {
+
+  match /databases/{database}/documents {
+
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    // USERS
+    match /users/{userId} {
+      allow read: if true;
+      allow create, update, delete: if isAuthenticated();
+    }
+
+    // APPROVED ORGANIZERS
+    match /approvedOrganizers/{orgId} {
+      allow read: if true;
+      allow write: if isAuthenticated();
+    }
+
+    // ORGANIZER REQUESTS
+    match /organizerRequests/{requestId} {
+      allow read: if true;
+      allow create, update, delete: if isAuthenticated();
+    }
+
+    // TOURNAMENTS
+    match /tournaments/{tournamentId} {
+      allow read: if true;
+      allow create, update, delete: if isAuthenticated();
+    }
+
+    // TOURNAMENT PLAYERS
+    match /tournamentPlayers/{docId} {
+      allow read: if true;
+      allow create, update, delete: if isAuthenticated();
+    }
+
+    // MATCHES
+    match /matches/{matchId} {
+      allow read: if true;
+      allow create, update, delete: if isAuthenticated();
+    }
+
+    // TOURNAMENT GROUPS
+    match /tournamentGroups/{groupId} {
+      allow read: if true;
+      allow create, update, delete: if isAuthenticated();
+    }
+
+    // TOURNAMENT SESSIONS
+    match /tournamentSessions/{sessionId} {
+      allow read: if true;
+      allow create, update, delete: if isAuthenticated();
+    }
+
+    // ROUND SCORES
+    match /roundScores/{scoreId} {
+      allow read: if true;
+      allow create, update, delete: if isAuthenticated();
+    }
+
+    // WITHDRAWAL REQUESTS
+    match /withdrawalRequests/{requestId} {
+      allow read: if true;
+      allow create, update, delete: if isAuthenticated();
+    }
+  }
+}
+
+
+
