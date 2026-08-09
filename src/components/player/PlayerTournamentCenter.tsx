@@ -497,8 +497,14 @@ export const PlayerTournamentCenter: React.FC<PlayerTournamentCenterProps> = ({ 
       </div>
 
       {/* TOURNAMENT DETAIL MODAL */}
-      {activeTournament && (
-        <div className="fixed inset-0 z-50 bg-slate-950/80 backdrop-blur-md flex items-center justify-center p-3 sm:p-4">
+      {activeTournament && (() => {
+        const activePlayers = db.getTournamentPlayers(activeTournament.id);
+        const activeConfirmed = activePlayers.filter((p) => p.paymentStatus === 'CONFIRMED' || p.playerStatus === 'Checked In' || p.playerStatus === 'Playing' || p.playerStatus === 'Champion' || p.playerStatus === 'Eliminated');
+        const isActiveFull = activeConfirmed.length >= activeTournament.maxPlayers;
+        const isActiveRegistered = activePlayers.some((p) => p.userId === user.id);
+
+        return (
+          <div className="fixed inset-0 z-50 bg-slate-950/80 backdrop-blur-md flex items-center justify-center p-3 sm:p-4">
           <div className="bg-slate-900 border border-slate-750 text-slate-100 rounded-3xl w-full max-w-2xl max-h-[90vh] flex flex-col shadow-2xl overflow-hidden">
             {/* Modal Top Banner */}
             <div className="relative h-36 bg-slate-800 shrink-0">
@@ -615,7 +621,7 @@ export const PlayerTournamentCenter: React.FC<PlayerTournamentCenterProps> = ({ 
                       </p>
                       {activeTournament.telebirrNumber && (
                         <p className="text-emerald-400 font-mono text-xs font-bold pt-1">
-                          📞 Phone Number: {activeTournament.telebirrNumber}
+                          📞 {activeTournament.telebirrNumber}
                         </p>
                       )}
                     </div>
@@ -1053,13 +1059,26 @@ export const PlayerTournamentCenter: React.FC<PlayerTournamentCenterProps> = ({ 
             </div>
 
             {/* Modal Footer */}
-            <div className="p-3 bg-slate-850 border-t border-slate-800 flex items-center justify-between">
+            <div className="p-3 bg-slate-850 border-t border-slate-800 flex items-center justify-between gap-2">
               <button
                 onClick={() => setInviteTourModal(activeTournament)}
                 className="text-xs font-bold px-4 py-2 bg-amber-500/10 hover:bg-amber-500/20 text-amber-300 rounded-xl border border-amber-500/30 flex items-center gap-1.5"
               >
                 <Share2 className="w-4 h-4 text-amber-400" />
                 Invite Players
+              </button>
+              <button
+                onClick={() => handleOpenRegisterPaymentModal(activeTournament.id)}
+                disabled={isActiveRegistered || isActiveFull || activeTournament.status === 'Ongoing' || activeTournament.status === 'Completed' || activeTournament.status === 'Finished'}
+                className="text-xs font-extrabold px-4 py-2 bg-sky-400 hover:bg-sky-300 disabled:opacity-50 text-slate-950 rounded-xl transition-all shadow-md active:scale-95 flex items-center gap-1.5"
+              >
+                {isActiveRegistered
+                  ? 'Registered'
+                  : activeTournament.status === 'Ongoing' || activeTournament.status === 'Completed' || activeTournament.status === 'Finished'
+                  ? 'Registration Closed'
+                  : isActiveFull
+                  ? 'Tournament Full'
+                  : 'Register'}
               </button>
               <button
                 onClick={() => setActiveTournament(null)}
@@ -1070,7 +1089,8 @@ export const PlayerTournamentCenter: React.FC<PlayerTournamentCenterProps> = ({ 
             </div>
           </div>
         </div>
-      )}
+      );
+    })()}
 
       {/* PAYMENT SCREENSHOT UPLOAD MODAL */}
       {paymentRegisterTourId && (() => {
