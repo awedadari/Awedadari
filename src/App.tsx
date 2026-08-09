@@ -21,7 +21,7 @@ import { OrganizerPanel } from './components/organizer/OrganizerPanel';
 import { OrganizerProfile } from './components/organizer/OrganizerProfile';
 
 export default function App() {
-  const { activeUser, loading } = useDbStore();
+  const { activeUser, loading, tournaments } = useDbStore();
   const [activeTab, setActiveTab] = useState<NavTab>('home');
   const [organizerPanelSubTab, setOrganizerPanelSubTab] = useState<
     'tournaments' | 'create_tour' | 'players' | 'matches' | 'results' | 'progress'
@@ -30,6 +30,7 @@ export default function App() {
   const [isAdminPortalOpen, setIsAdminPortalOpen] = useState(false);
   const [isInboxOpen, setIsInboxOpen] = useState(false);
   const [selectedTournamentForOverview, setSelectedTournamentForOverview] = useState<Tournament | null>(null);
+  const [handledDeepLink, setHandledDeepLink] = useState(false);
 
   const handleSelectTournament = (t: Tournament) => {
     setSelectedTournamentForOverview(t);
@@ -43,13 +44,34 @@ export default function App() {
     });
   }, []);
 
+  // Handle Telegram Direct Mini App startapp deep links (e.g. startapp=tour_1786298912734)
+  useEffect(() => {
+    if (handledDeepLink) return;
+
+    const startParam = telegramService.getStartParam();
+    if (!startParam) {
+      setHandledDeepLink(true);
+      return;
+    }
+
+    const foundTour = db.getTournamentByStartParam(startParam);
+    if (foundTour) {
+      setSelectedTournamentForOverview(foundTour);
+      setActiveTab('tournaments');
+      setHandledDeepLink(true);
+    } else if (!loading && (tournaments.length > 0 || db.getTournaments().length > 0)) {
+      // Data finished loading and tournament list is populated, but requested tournament was not found - fallback gracefully
+      setHandledDeepLink(true);
+    }
+  }, [loading, tournaments, handledDeepLink]);
+
   // If role is switched from Organizer to Player while on 'organizer_panel', fallback to 'home'
   if (activeUser.role === 'PLAYER' && activeTab === 'organizer_panel') {
     setActiveTab('home');
   }
 
-  // If role is ORGANIZER and activeTab is 'tournaments', redirect to 'organizer_panel'
-  if (activeUser.role === 'ORGANIZER' && activeTab === 'tournaments') {
+  // If role is ORGANIZER and activeTab is 'tournaments', redirect to 'organizer_panel' unless viewing a specific tournament overview
+  if (activeUser.role === 'ORGANIZER' && activeTab === 'tournaments' && !selectedTournamentForOverview) {
     setActiveTab('organizer_panel');
   }
 
@@ -116,10 +138,17 @@ export default function App() {
                 />
               )}
               {activeTab === 'tournaments' && (
-                <OrganizerTournamentCenter
-                  user={activeUser}
-                  onOpenPanelWithTab={handleOpenPanelWithTab}
-                />
+                selectedTournamentForOverview ? (
+                  <PlayerTournamentCenter
+                    user={activeUser}
+                    initialTournament={selectedTournamentForOverview}
+                  />
+                ) : (
+                  <OrganizerTournamentCenter
+                    user={activeUser}
+                    onOpenPanelWithTab={handleOpenPanelWithTab}
+                  />
+                )
               )}
               {activeTab === 'players' && (
                 <PlayersLeaderboardView currentUser={activeUser} />

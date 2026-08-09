@@ -552,6 +552,10 @@ class DatabaseService {
   // SEED & RESET DEMO DATA IN FIRESTORE
   // =========================================================================
   public async seedDemoData(): Promise<void> {
+    if (!auth.currentUser) {
+      console.warn('Skipping seedDemoData: No active Firebase Auth user.');
+      return;
+    }
     const batch = writeBatch(firestore);
 
     // Seed Users
@@ -1385,6 +1389,33 @@ class DatabaseService {
 
   public getTournamentById(id: string): Tournament | undefined {
     return this.tournaments.find((t) => t.id === id);
+  }
+
+  public getTournamentByStartParam(startParam: string): Tournament | undefined {
+    if (!startParam || typeof startParam !== 'string') return undefined;
+    const cleanParam = decodeURIComponent(startParam).trim();
+    if (!cleanParam) return undefined;
+
+    // 1. Direct match
+    let found = this.tournaments.find((t) => t.id === cleanParam);
+    if (found) return found;
+
+    // 2. Strip "tour_tour_" or "tour_"
+    const stripped = cleanParam.replace(/^tour_tour_/, '').replace(/^tour_/, '');
+    if (stripped) {
+      found = this.tournaments.find(
+        (t) => t.id === stripped || t.id === `tour_${stripped}` || t.id === `tour_tour_${stripped}`
+      );
+      if (found) return found;
+
+      found = this.tournaments.find((t) => t.id.endsWith(stripped));
+      if (found) return found;
+    }
+
+    // 3. Fallback search
+    return this.tournaments.find(
+      (t) => cleanParam.includes(t.id) || t.id.includes(cleanParam)
+    );
   }
 
   public async approveTournament(

@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { Tournament } from '../../types';
 import { Trophy, Share2, Copy, Check, Send, X, ExternalLink } from 'lucide-react';
+import { generateTournamentMiniAppDeepLink } from '../../services/telegramService';
 
 interface InviteModalProps {
   tournament: Tournament;
@@ -11,21 +12,24 @@ export const InviteModal: React.FC<InviteModalProps> = ({ tournament, onClose })
   const [copiedLink, setCopiedLink] = useState(false);
   const [copiedText, setCopiedText] = useState(false);
 
-  const botInviteUrl = `https://t.me/Awedadari_bot?start=tour_${tournament.id}`;
+  const miniAppInviteUrl = generateTournamentMiniAppDeepLink(tournament.id);
   
-  const inviteMessage = `🎮 *Sefer Gamers Tournament Invitation* 🏆
+  const tourAward = tournament.award?.trim() || tournament.prizePool?.trim();
+  const awardLine = tourAward ? `\n🏆 *Tournament Award*: ${tourAward}` : '';
+
+  const inviteMessage = `🎮 *Awedadari Tournament Invitation* 🏆
 
 *${tournament.tournamentName}* (${tournament.game})
 📍 *Venue*: ${tournament.venueName || 'Nexus Gaming Lounge'} (${tournament.venueLocation || 'Bole Medhanialem'})
 📅 *Date & Time*: ${tournament.date} @ ${tournament.time}
-💰 *Entry Fee*: ${tournament.registrationFee || '50 ETB'}
+💰 *Entry Fee*: ${tournament.registrationFee || '50 ETB'}${awardLine}
 👥 *Max Slots*: ${tournament.maxPlayers} Players
 
-Click to join & register via Telegram Bot:
-${botInviteUrl}`;
+🎮 *Tap to view tournament & register:*
+${miniAppInviteUrl}`;
 
   const handleCopyLink = () => {
-    navigator.clipboard.writeText(botInviteUrl);
+    navigator.clipboard.writeText(miniAppInviteUrl);
     setCopiedLink(true);
     setTimeout(() => setCopiedLink(false), 3000);
   };
@@ -38,7 +42,7 @@ ${botInviteUrl}`;
 
   const handleShareTelegram = () => {
     const encodedText = encodeURIComponent(inviteMessage);
-    window.open(`https://t.me/share/url?url=${encodeURIComponent(botInviteUrl)}&text=${encodedText}`, '_blank');
+    window.open(`https://t.me/share/url?url=${encodeURIComponent(miniAppInviteUrl)}&text=${encodedText}`, '_blank');
   };
 
   return (
@@ -83,12 +87,12 @@ ${botInviteUrl}`;
 
         {/* Direct Bot Link Input & Button */}
         <div className="space-y-1.5">
-          <label className="block text-xs font-bold text-slate-300">Bot Deep Link</label>
+          <label className="block text-xs font-bold text-slate-300">Mini App Deep Link</label>
           <div className="flex items-center gap-2">
             <input
               type="text"
               readOnly
-              value={botInviteUrl}
+              value={miniAppInviteUrl}
               className="flex-1 bg-slate-950 border border-slate-800 rounded-xl px-3 py-2 text-xs font-mono text-amber-300 focus:outline-hidden"
             />
             <button

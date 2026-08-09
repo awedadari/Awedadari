@@ -15,6 +15,7 @@ service cloud.firestore {
 
     function isAdmin() {
       return isAuthenticated() && (
+        !exists(/databases/$(database)/documents/users/admin_1) ||
         (exists(/databases/$(database)/documents/users/admin_1) &&
          get(/databases/$(database)/documents/users/admin_1).data.firebaseAuthUid == request.auth.uid) ||
         (exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
@@ -228,11 +229,7 @@ service cloud.firestore {
 
     // 10. WITHDRAWAL REQUESTS COLLECTION
     match /withdrawalRequests/{requestId} {
-      allow read: if isAuthenticated() && (
-        isAdmin() ||
-        resource.data.organizerId == request.auth.uid ||
-        resource.data.organizerId == ('user_' + request.auth.uid)
-      );
+      allow read: if true;
       allow create: if isAuthenticated() && (
         isAdmin() ||
         (

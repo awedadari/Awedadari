@@ -12,6 +12,7 @@ declare global {
           query_id?: string;
           auth_date?: number;
           hash?: string;
+          start_param?: string;
         };
         colorScheme?: 'light' | 'dark';
         themeParams?: Record<string, string>;
@@ -100,6 +101,51 @@ class TelegramService {
     return !!(window.Telegram?.WebApp?.initDataUnsafe?.user || this.isTelegramSDKAvailable);
   }
 
+  /**
+   * Retrieves start_param from Telegram WebApp SDK or URL search/hash params
+   * e.g. startapp=tour_tour_1786184595032 or tgWebAppStartParam=tour_1786184595032
+   */
+  public getStartParam(): string | null {
+    if (typeof window === 'undefined') return null;
+
+    // 1. Check official Telegram WebApp SDK initDataUnsafe.start_param
+    const tgStartParam = window.Telegram?.WebApp?.initDataUnsafe?.start_param;
+    if (tgStartParam && typeof tgStartParam === 'string' && tgStartParam.trim()) {
+      return tgStartParam.trim();
+    }
+
+    // 2. Check URL search parameters (tgWebAppStartParam, startapp, start_param)
+    try {
+      const searchParams = new URLSearchParams(window.location.search);
+      const param =
+        searchParams.get('tgWebAppStartParam') ||
+        searchParams.get('startapp') ||
+        searchParams.get('start_param');
+      if (param && param.trim()) {
+        return param.trim();
+      }
+
+      // 3. Check URL hash parameters
+      if (window.location.hash) {
+        const hashStr = window.location.hash.includes('?')
+          ? window.location.hash.split('?')[1]
+          : window.location.hash.replace(/^#/, '');
+        const hashParams = new URLSearchParams(hashStr);
+        const hashParam =
+          hashParams.get('tgWebAppStartParam') ||
+          hashParams.get('startapp') ||
+          hashParams.get('start_param');
+        if (hashParam && hashParam.trim()) {
+          return hashParam.trim();
+        }
+      }
+    } catch {
+      // Safe fallback
+    }
+
+    return null;
+  }
+
   public triggerHaptic(style: 'light' | 'medium' | 'heavy' | 'success' | 'warning' = 'light') {
     if (typeof window !== 'undefined' && window.Telegram?.WebApp?.HapticFeedback) {
       try {
@@ -181,3 +227,16 @@ class TelegramService {
 }
 
 export const telegramService = new TelegramService();
+
+/**
+ * Reusable Direct Mini App Deep Link generator for channel posts
+ * e.g. https://t.me/Awedadari_bot?startapp=tour_1786218014055
+ */
+export function generateTournamentMiniAppDeepLink(
+  tournamentId: string,
+  botUsername: string = TELEGRAM_BOT_DEFAULT.botUsername
+): string {
+  const encodedId = encodeURIComponent(tournamentId);
+  return `https://t.me/${botUsername}?startapp=${encodedId}`;
+}
+
