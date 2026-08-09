@@ -51,9 +51,7 @@ export const OrganizerHome: React.FC<OrganizerHomeProps> = ({ user, onNavigateTo
   return (
     <div className="space-y-5 pb-28">
       {/* ORGANIZER VENUE CONTROL HERO BANNER */}
-      <div className="relative rounded-3xl overflow-hidden bg-gradient-to-br from-amber-950 via-slate-900 to-slate-950 border border-amber-500/30 p-5 shadow-2xl space-y-4">
-        {/* Glow accent */}
-        <div className="absolute -top-10 -right-10 w-44 h-44 bg-amber-500/15 rounded-full blur-3xl pointer-events-none" />
+      <div className="relative rounded-3xl overflow-hidden bg-slate-900 border border-amber-500/30 p-5 shadow-2xl space-y-4">
 
         <div className="relative z-10 flex items-center justify-between">
           <span className="text-[10px] font-black uppercase tracking-wider px-3 py-1 rounded-full bg-amber-500/20 text-amber-300 border border-amber-500/40 flex items-center gap-1.5">

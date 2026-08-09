@@ -118,7 +118,7 @@ export const TelegramBotModal: React.FC<TelegramBotModalProps> = ({
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-md animate-in fade-in duration-200">
       <div className="bg-slate-900 border border-slate-750 rounded-3xl w-full max-w-lg max-h-[90vh] overflow-y-auto shadow-2xl text-slate-100 flex flex-col">
         {/* Modal Header */}
-        <div className="p-4 bg-gradient-to-r from-sky-950 via-slate-900 to-indigo-950 border-b border-slate-800 flex items-center justify-between sticky top-0 z-10 backdrop-blur-md">
+        <div className="p-4 bg-slate-900 border-b border-slate-800 flex items-center justify-between sticky top-0 z-10 backdrop-blur-md">
           <div className="flex items-center gap-2.5">
             <div className="w-9 h-9 bg-sky-500/20 text-sky-400 rounded-2xl flex items-center justify-center border border-sky-500/30">
               <Send className="w-5 h-5" />

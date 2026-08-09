@@ -49,7 +49,7 @@ export const PlayersLeaderboardView: React.FC<PlayersLeaderboardViewProps> = ({
   return (
     <div className="space-y-6 pb-24">
       {/* Header Banner */}
-      <div className="bg-gradient-to-r from-emerald-950/80 via-slate-900 to-slate-850 border border-emerald-500/30 p-5 rounded-3xl shadow-xl flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
+      <div className="bg-slate-850 border border-emerald-500/30 p-5 rounded-3xl shadow-xl flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
         <div className="flex items-center gap-3">
           <div className="w-12 h-12 bg-emerald-500 text-slate-950 font-black rounded-2xl flex items-center justify-center shadow-lg shrink-0">
             <Trophy className="w-6 h-6" />
@@ -88,16 +88,16 @@ export const PlayersLeaderboardView: React.FC<PlayersLeaderboardViewProps> = ({
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
             {top3.map((rp, index) => {
               const medals = [
-                { bg: 'from-amber-500/20 via-amber-900/40 to-slate-900', border: 'border-amber-500/50', badge: '🥇 #1 CHAMPION', text: 'text-amber-300' },
-                { bg: 'from-slate-400/20 via-slate-800 to-slate-900', border: 'border-slate-400/50', badge: '🥈 #2 RUNNER-UP', text: 'text-slate-200' },
-                { bg: 'from-amber-700/20 via-amber-950 to-slate-900', border: 'border-amber-700/50', badge: '🥉 #3 THIRD PLACE', text: 'text-amber-500' },
+                { bg: 'bg-amber-950/40', border: 'border-amber-500/50', badge: '🥇 #1 CHAMPION', text: 'text-amber-300' },
+                { bg: 'bg-slate-850', border: 'border-slate-400/50', badge: '🥈 #2 RUNNER-UP', text: 'text-slate-200' },
+                { bg: 'bg-amber-950/20', border: 'border-amber-700/50', badge: '🥉 #3 THIRD PLACE', text: 'text-amber-500' },
               ][index];
 
               return (
                 <div
                   key={rp.user.id}
                   onClick={() => setSelectedPlayer(rp)}
-                  className={`bg-gradient-to-b ${medals.bg} border ${medals.border} p-4 rounded-3xl shadow-lg cursor-pointer hover:scale-[1.02] transition-all relative overflow-hidden group`}
+                  className={`${medals.bg} border ${medals.border} p-4 rounded-3xl shadow-lg cursor-pointer hover:scale-[1.02] transition-all relative overflow-hidden group`}
                 >
                   <div className="flex items-center justify-between mb-2">
                     <span className={`text-[10px] font-extrabold px-2 py-0.5 rounded-full bg-slate-950/80 ${medals.text} border ${medals.border}`}>

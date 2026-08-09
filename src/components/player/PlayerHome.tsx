@@ -204,10 +204,7 @@ export const PlayerHome: React.FC<PlayerHomeProps> = ({
       )}
 
       {/* DIVERSE HERO HUB BANNER */}
-      <div className="relative rounded-3xl overflow-hidden bg-gradient-to-br from-slate-900 via-sky-950 to-indigo-950 border border-sky-500/30 p-5 shadow-2xl space-y-4">
-        {/* Glow background effects */}
-        <div className="absolute -top-10 -right-10 w-40 h-40 bg-sky-500/20 rounded-full blur-3xl pointer-events-none" />
-        <div className="absolute -bottom-10 -left-10 w-40 h-40 bg-amber-500/15 rounded-full blur-3xl pointer-events-none" />
+      <div className="relative rounded-3xl overflow-hidden bg-slate-900 border border-sky-500/30 p-5 shadow-2xl space-y-4">
 
         <div className="relative z-10 flex items-center justify-between">
           <div className="flex items-center gap-2">
@@ -248,7 +245,7 @@ export const PlayerHome: React.FC<PlayerHomeProps> = ({
         {/* Gamertag & Team Card */}
         <div className="relative z-10 p-3.5 bg-slate-900/90 backdrop-blur-md rounded-2xl border border-slate-750 flex items-center justify-between shadow-inner">
           <div className="flex items-center gap-3 min-w-0 flex-1">
-            <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-sky-500 to-indigo-600 flex items-center justify-center text-white font-black text-sm shrink-0 shadow-md">
+            <div className="w-10 h-10 rounded-xl bg-sky-600 flex items-center justify-center text-white font-black text-sm shrink-0 shadow-md">
               <Gamepad2 className="w-5 h-5" />
             </div>
             <div className="min-w-0 flex-1">

@@ -513,7 +513,7 @@ export const PlayerTournamentCenter: React.FC<PlayerTournamentCenterProps> = ({ 
                 alt={activeTournament.tournamentName}
                 className="w-full h-full object-cover"
               />
-              <div className="absolute inset-0 bg-gradient-to-t from-slate-900 via-slate-900/40 to-transparent" />
+              <div className="absolute inset-0 bg-slate-900/60" />
               <button
                 onClick={() => setActiveTournament(null)}
                 className="absolute top-3 right-3 w-8 h-8 rounded-full bg-slate-900/80 text-white flex items-center justify-center hover:bg-slate-800 border border-slate-700"

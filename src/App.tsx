@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import { Send, ExternalLink } from 'lucide-react';
 import { useDbStore } from './hooks/useDbStore';
 import { NavTab, Tournament } from './types';
 import { db } from './services/db';
@@ -6,7 +7,7 @@ import { Header } from './components/Header';
 import { BottomNav } from './components/BottomNav';
 import { TelegramBotModal } from './components/TelegramBotModal';
 import { AdminPortalModal } from './components/admin/AdminPortalModal';
-import { telegramService } from './services/telegramService';
+import { telegramService, TELEGRAM_BOT_DEFAULT } from './services/telegramService';
 
 // Player Views
 import { PlayerHome } from './components/player/PlayerHome';
@@ -32,6 +33,8 @@ export default function App() {
   const [selectedTournamentForOverview, setSelectedTournamentForOverview] = useState<Tournament | null>(null);
   const [handledDeepLink, setHandledDeepLink] = useState(false);
 
+  const isInsideTelegram = telegramService.isInsideTelegram();
+
   const handleSelectTournament = (t: Tournament) => {
     setSelectedTournamentForOverview(t);
     handleTabChange('tournaments');
@@ -39,10 +42,11 @@ export default function App() {
 
   // Auto-authenticate when opened inside Telegram WebApp
   useEffect(() => {
+    if (!isInsideTelegram) return;
     telegramService.autoAuthenticateWithTelegram().catch((err) => {
       console.warn('Telegram auto-authentication notice:', err);
     });
-  }, []);
+  }, [isInsideTelegram]);
 
   // Handle Telegram Direct Mini App startapp deep links (e.g. startapp=tour_1786298912734)
   useEffect(() => {
@@ -92,6 +96,35 @@ export default function App() {
     setActiveTab('home');
     telegramService.triggerHaptic('warning');
   };
+
+  if (!isInsideTelegram) {
+    return (
+      <div className="min-h-screen bg-slate-950 text-slate-100 font-sans antialiased selection:bg-sky-500 selection:text-white flex items-center justify-center p-4">
+        <div className="w-full max-w-sm bg-slate-900 border border-slate-800 rounded-3xl p-6 text-center space-y-5 shadow-2xl">
+          <div className="w-16 h-16 bg-sky-500/20 text-sky-400 rounded-2xl flex items-center justify-center mx-auto border border-sky-500/30">
+            <Send className="w-8 h-8" />
+          </div>
+          <div className="space-y-2">
+            <h1 className="text-lg font-bold text-slate-100">Telegram Mini App</h1>
+            <p className="text-sm text-slate-400 leading-relaxed">
+              This app is designed to be used inside Telegram.
+              <br />
+              Please open it through the Awedadari Telegram Mini App.
+            </p>
+          </div>
+          <a
+            href={`https://t.me/${TELEGRAM_BOT_DEFAULT.botUsername}`}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="inline-flex items-center justify-center gap-2 w-full py-3 px-4 bg-sky-500 hover:bg-sky-400 text-slate-950 font-extrabold rounded-2xl transition-all shadow-lg text-sm"
+          >
+            <span>Open in Telegram</span>
+            <ExternalLink className="w-4 h-4" />
+          </a>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100 font-sans antialiased selection:bg-sky-500 selection:text-white flex justify-center">

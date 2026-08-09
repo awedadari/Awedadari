@@ -500,7 +500,7 @@ const CompletedTournamentViewPage: React.FC<CompletedTournamentViewPageProps> = 
         <div className="bg-slate-850 border border-slate-750 rounded-3xl p-5 space-y-4 shadow-md text-xs">
           <div className="relative rounded-2xl overflow-hidden border border-slate-700 h-44">
             <img src={tournament.image} alt={tournament.tournamentName} className="w-full h-full object-cover" />
-            <div className="absolute inset-0 bg-gradient-to-t from-slate-950 via-slate-950/40 to-transparent p-4 flex flex-col justify-end">
+            <div className="absolute inset-0 bg-slate-950/60 p-4 flex flex-col justify-end">
               <span className="px-2.5 py-0.5 bg-sky-500/20 text-sky-300 font-extrabold text-[10px] rounded border border-sky-500/30 uppercase w-fit">
                 {tournament.game}
               </span>
@@ -1965,7 +1965,7 @@ export const OrganizerPanel: React.FC<OrganizerPanelProps> = ({ user }) => {
                 </div>
 
                 {/* Organizer Code Check-In Box (Requirement 3) */}
-                <div className="p-3.5 bg-gradient-to-r from-sky-950/40 to-slate-900 border border-sky-500/30 rounded-2xl space-y-2">
+                <div className="p-3.5 bg-slate-900 border border-sky-500/30 rounded-2xl space-y-2">
                   <div className="flex items-center gap-2 text-xs font-black text-sky-300">
                     <CheckCircle2 className="w-4 h-4 text-sky-400" />
                     <span>Code Verification</span>

@@ -98,7 +98,12 @@ class TelegramService {
   }
 
   public isInsideTelegram(): boolean {
-    return !!(window.Telegram?.WebApp?.initDataUnsafe?.user || this.isTelegramSDKAvailable);
+    if (typeof window === 'undefined') return false;
+    const webApp = window.Telegram?.WebApp;
+    if (!webApp) return false;
+    const hasInitData = typeof webApp.initData === 'string' && webApp.initData.trim().length > 0;
+    const hasUser = !!webApp.initDataUnsafe?.user;
+    return hasInitData || hasUser || this.isTelegramSDKAvailable;
   }
 
   /**
@@ -168,6 +173,10 @@ class TelegramService {
    * 4. Process Telegram User profile in Firestore/db
    */
   public async autoAuthenticateWithTelegram(): Promise<{ success: boolean; isNewUser: boolean; roleGiven: string }> {
+    if (!this.isInsideTelegram()) {
+      return { success: false, isNewUser: false, roleGiven: 'PLAYER' };
+    }
+
     const initData = typeof window !== 'undefined' ? window.Telegram?.WebApp?.initData : undefined;
     const user = this.getTelegramUser();
 

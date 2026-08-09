@@ -108,7 +108,7 @@ export const InboxModal: React.FC<InboxModalProps> = ({ isOpen, onClose, activeU
         </div>
 
         {/* Telegram Direct Bot Connection Card (Requirement 5B) */}
-        <div className="p-4 bg-gradient-to-r from-sky-950/60 to-indigo-950/60 border border-sky-500/30 rounded-2xl space-y-3">
+        <div className="p-4 bg-slate-850 border border-sky-500/30 rounded-2xl space-y-3">
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-2">
               <div className="p-1.5 bg-sky-500/20 text-sky-300 rounded-lg">

@@ -37,7 +37,7 @@ export const OrganizerProfile: React.FC<OrganizerProfileProps> = ({ user }) => {
   return (
     <div className="space-y-4 pb-24">
       {/* Host Profile Card */}
-      <div className="bg-gradient-to-br from-amber-950/40 via-slate-850 to-slate-850 border border-amber-500/30 rounded-2xl p-5 text-center relative overflow-hidden shadow-lg">
+      <div className="bg-slate-850 border border-amber-500/30 rounded-2xl p-5 text-center relative overflow-hidden shadow-lg">
         <div className="relative inline-block mx-auto group">
           <img
             src={user.profileImage}
