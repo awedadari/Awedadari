@@ -15,17 +15,17 @@ export const InviteModal: React.FC<InviteModalProps> = ({ tournament, onClose })
   const miniAppInviteUrl = generateTournamentMiniAppDeepLink(tournament.id);
   
   const tourAward = tournament.award?.trim() || tournament.prizePool?.trim();
-  const awardLine = tourAward ? `\n🏆 *Tournament Award*: ${tourAward}` : '';
+  const awardLine = tourAward ? `\n🏆 Tournament Award: ${tourAward}` : '';
 
-  const inviteMessage = `🎮 *Awedadari Tournament Invitation* 🏆
+  const inviteMessage = `Awedadari Tournament Invitation 🏆
 
-*${tournament.tournamentName}* (${tournament.game})
-📍 *Venue*: ${tournament.venueName || 'Nexus Gaming Lounge'} (${tournament.venueLocation || 'Bole Medhanialem'})
-📅 *Date & Time*: ${tournament.date} @ ${tournament.time}
-💰 *Entry Fee*: ${tournament.registrationFee || '50 ETB'}${awardLine}
-👥 *Max Slots*: ${tournament.maxPlayers} Players
+${tournament.tournamentName} (${tournament.game})
+📍 Venue: ${tournament.venueName || 'Nexus Gaming Lounge'} (${tournament.venueLocation || 'Bole Medhanialem'})
+📅 Date & Time: ${tournament.date} @ ${tournament.time}
+💰 Entry Fee: ${tournament.registrationFee || '50 ETB'}${awardLine}
+👥 Max Slots: ${tournament.maxPlayers} Players
 
-🎮 *Tap to view tournament & register:*
+Tap to view tournament & register:
 ${miniAppInviteUrl}`;
 
   const handleCopyLink = () => {
