@@ -44,7 +44,7 @@ export const AdminPortalModal: React.FC<AdminPortalModalProps> = ({ isOpen, onCl
     }
   }, [isOpen]);
 
-  const [activeTab, setActiveTab] = useState<'users' | 'organizers' | 'tournaments' | 'settings' | 'withdrawals' | 'registration_requests'>(
+  const [activeTab, setActiveTab] = useState<'users' | 'organizers' | 'tournaments' | 'withdrawals' | 'registration_requests'>(
     'users'
   );
   const [searchTerm, setSearchTerm] = useState('');
@@ -378,7 +378,21 @@ export const AdminPortalModal: React.FC<AdminPortalModalProps> = ({ isOpen, onCl
                   }`}
                 >
                   <Users className="w-3.5 h-3.5" />
-                  User Management ({allUsers.length})
+                  Users ({allUsers.length})
+                </button>
+
+                <button
+                  onClick={() => setActiveTab('registration_requests')}
+                  className={`px-3.5 py-2 rounded-xl text-xs font-bold transition-all flex items-center gap-1.5 ${
+                    activeTab === 'registration_requests'
+                      ? 'bg-amber-500 text-slate-950 shadow-md font-black'
+                      : 'bg-slate-850 text-slate-400 hover:bg-slate-800 hover:text-slate-200'
+                  }`}
+                >
+                  <FileText className="w-3.5 h-3.5" />
+                  Requests ({
+                    db.getTournaments().flatMap((t) => db.getTournamentPlayers(t.id)).filter((p) => p.paymentStatus === 'PENDING_APPROVAL').length
+                  })
                 </button>
 
                 <button
@@ -390,7 +404,7 @@ export const AdminPortalModal: React.FC<AdminPortalModalProps> = ({ isOpen, onCl
                   }`}
                 >
                   <ShieldCheck className="w-3.5 h-3.5" />
-                  Approved Organizers ({approvedOrgIds.length})
+                  Organizers ({approvedOrgIds.length})
                 </button>
 
                 <button
@@ -406,18 +420,6 @@ export const AdminPortalModal: React.FC<AdminPortalModalProps> = ({ isOpen, onCl
                 </button>
 
                 <button
-                  onClick={() => setActiveTab('settings')}
-                  className={`px-3.5 py-2 rounded-xl text-xs font-bold transition-all flex items-center gap-1.5 ${
-                    activeTab === 'settings'
-                      ? 'bg-amber-500 text-slate-950 shadow-md'
-                      : 'bg-slate-850 text-slate-400 hover:bg-slate-800 hover:text-slate-200'
-                  }`}
-                >
-                  <KeyRound className="w-3.5 h-3.5" />
-                  Admin Passcode
-                </button>
-
-                <button
                   onClick={() => setActiveTab('withdrawals')}
                   className={`px-3.5 py-2 rounded-xl text-xs font-bold transition-all flex items-center gap-1.5 ${
                     activeTab === 'withdrawals'
@@ -427,20 +429,6 @@ export const AdminPortalModal: React.FC<AdminPortalModalProps> = ({ isOpen, onCl
                 >
                   <DollarSign className="w-3.5 h-3.5" />
                   Finance ({db.getWithdrawalRequests().filter((r) => r.status === 'Pending Approval').length})
-                </button>
-
-                <button
-                  onClick={() => setActiveTab('registration_requests')}
-                  className={`px-3.5 py-2 rounded-xl text-xs font-bold transition-all flex items-center gap-1.5 ${
-                    activeTab === 'registration_requests'
-                      ? 'bg-amber-500 text-slate-950 shadow-md font-black'
-                      : 'bg-slate-850 text-slate-400 hover:bg-slate-800 hover:text-slate-200'
-                  }`}
-                >
-                  <FileText className="w-3.5 h-3.5" />
-                  Registration Requests ({
-                    db.getTournaments().flatMap((t) => db.getTournamentPlayers(t.id)).filter((p) => p.paymentStatus === 'PENDING_APPROVAL').length
-                  })
                 </button>
               </div>
             </div>
@@ -854,21 +842,6 @@ export const AdminPortalModal: React.FC<AdminPortalModalProps> = ({ isOpen, onCl
                         );
                       })}
                   </div>
-                </div>
-              </div>
-            )}
-
-            {/* TAB 4: ADMIN SETTINGS */}
-            {activeTab === 'settings' && (
-              <div className="space-y-4">
-                <div className="p-4 bg-slate-850 rounded-2xl border border-slate-750 space-y-3">
-                  <h3 className="font-bold text-white text-sm flex items-center gap-2">
-                    <KeyRound className="w-4 h-4 text-amber-400" />
-                    Admin Security & Authentication
-                  </h3>
-                  <p className="text-xs text-slate-400 leading-relaxed">
-                    Admin access is managed through cloud-authenticated Firebase Email & Password credentials. All session tokens and authentication state are secured by Firebase Authentication.
-                  </p>
                 </div>
               </div>
             )}
