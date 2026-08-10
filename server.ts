@@ -9,7 +9,7 @@ import { getFirestore } from 'firebase-admin/firestore';
 import { createServer as createViteServer } from 'vite';
 
 const firebaseConfigPath = path.join(process.cwd(), 'firebase-applet-config.json');
-let firebaseConfig: { projectId: string } = { projectId: 'tewedadari-app' };
+let firebaseConfig: { projectId: string; firestoreDatabaseId?: string } = { projectId: 'tewedadari-app' };
 if (fs.existsSync(firebaseConfigPath)) {
   try {
     firebaseConfig = JSON.parse(fs.readFileSync(firebaseConfigPath, 'utf8'));
@@ -24,6 +24,14 @@ function ensureFirebaseAdmin() {
       projectId: firebaseConfig.projectId,
     });
   }
+}
+
+function getAdminFirestore() {
+  ensureFirebaseAdmin();
+  const rawDbId = firebaseConfig.firestoreDatabaseId;
+  const dbId = rawDbId && rawDbId !== '(default)' ? rawDbId : undefined;
+  const app = getApps()[0];
+  return dbId ? getFirestore(app, dbId) : getFirestore(app);
 }
 
 async function getAuthUid(req: express.Request): Promise<string | null> {
@@ -52,8 +60,7 @@ async function getAuthUid(req: express.Request): Promise<string | null> {
 
 async function isServerAdmin(uid: string): Promise<boolean> {
   if (!uid) return false;
-  ensureFirebaseAdmin();
-  const db = getFirestore();
+  const db = getAdminFirestore();
   try {
     const admin1Snap = await db.collection('users').doc('admin_1').get();
     if (admin1Snap.exists && admin1Snap.data()?.firebaseAuthUid === uid) {
@@ -76,8 +83,7 @@ async function isServerAdmin(uid: string): Promise<boolean> {
 async function isServerTournamentOrganizer(uid: string, tournamentId: string): Promise<boolean> {
   if (!uid || !tournamentId) return false;
   if (await isServerAdmin(uid)) return true;
-  ensureFirebaseAdmin();
-  const db = getFirestore();
+  const db = getAdminFirestore();
   try {
     const tourSnap = await db.collection('tournaments').doc(tournamentId).get();
     if (!tourSnap.exists) return false;
@@ -225,8 +231,7 @@ async function startServer() {
         return res.status(403).json({ success: false, error: 'Forbidden: Insufficient permissions for payment confirmation' });
       }
 
-      ensureFirebaseAdmin();
-      const db = getFirestore();
+      const db = getAdminFirestore();
       const docId = `${tournamentId}_${userId}`;
       const playerRef = db.collection('tournamentPlayers').doc(docId);
       const playerSnap = await playerRef.get();
@@ -287,8 +292,7 @@ async function startServer() {
         return res.status(403).json({ success: false, error: 'Forbidden: Cannot request withdrawal for another organizer' });
       }
 
-      ensureFirebaseAdmin();
-      const db = getFirestore();
+      const db = getAdminFirestore();
 
       if (idempotencyKey) {
         const dupSnap = await db
@@ -370,8 +374,7 @@ async function startServer() {
         return res.status(403).json({ success: false, error: 'Forbidden: Admin access required to process withdrawals' });
       }
 
-      ensureFirebaseAdmin();
-      const db = getFirestore();
+      const db = getAdminFirestore();
       const reqRef = db.collection('withdrawalRequests').doc(requestId);
       const reqSnap = await reqRef.get();
 
