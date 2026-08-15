@@ -3,8 +3,8 @@ import { User, Tournament, TournamentPlayer, Match } from '../types';
 export const INITIAL_USERS: User[] = [
   {
     id: 'user_tg_88492019',
-    name: 'Marcus Vane (Arena Host)',
-    username: 'marcus_esports',
+    name: 'Natnael Tsegazeab',
+    username: 'NatiTsega',
     profileImage: 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=150&auto=format&fit=crop&q=80',
     telegramUserId: 'tg_88492019',
     role: 'ORGANIZER',
@@ -93,7 +93,7 @@ export const INITIAL_TOURNAMENTS: Tournament[] = [
     isApproved: true,
     registrationFee: '100 ETB',
     telebirrNumber: '0911223344',
-    telebirrAccountName: 'Marcus Vane / Nexus Gaming',
+    telebirrAccountName: 'Nexus Gaming Arena',
   },
   {
     id: 'tour_2',
@@ -115,7 +115,7 @@ export const INITIAL_TOURNAMENTS: Tournament[] = [
     isApproved: true,
     registrationFee: '50 ETB',
     telebirrNumber: '0911223344',
-    telebirrAccountName: 'Marcus Vane / Nexus Gaming',
+    telebirrAccountName: 'Nexus Gaming Arena',
   },
   {
     id: 'tour_3',
@@ -138,7 +138,7 @@ export const INITIAL_TOURNAMENTS: Tournament[] = [
     isApproved: true,
     registrationFee: '150 ETB',
     telebirrNumber: '0911223344',
-    telebirrAccountName: 'Marcus Vane / Nexus Gaming',
+    telebirrAccountName: 'Nexus Gaming Arena',
   },
   {
     id: 'tour_4',
@@ -160,7 +160,7 @@ export const INITIAL_TOURNAMENTS: Tournament[] = [
     isApproved: true,
     registrationFee: '50 ETB',
     telebirrNumber: '0911223344',
-    telebirrAccountName: 'Marcus Vane / Nexus Gaming',
+    telebirrAccountName: 'Nexus Gaming Arena',
   },
   {
     id: 'tour_5',
@@ -182,7 +182,7 @@ export const INITIAL_TOURNAMENTS: Tournament[] = [
     isApproved: true,
     registrationFee: 'Free',
     telebirrNumber: '0911223344',
-    telebirrAccountName: 'Marcus Vane / Nexus Gaming',
+    telebirrAccountName: 'Nexus Gaming Arena',
     finalStandings: [
       { userId: 'user_tg_77201948', rank: 1, points: 15, performance: 12, badge: 'CHAMPION 🏆' },
       { userId: 'user_tg_55019283', rank: 2, points: 12, performance: 9, badge: 'RUNNER-UP 🥈' },

@@ -118,7 +118,7 @@ class DatabaseService {
   private organizerRequests: OrganizerRequest[] = [];
   private withdrawalRequests: WithdrawalRequest[] = [];
   private approvedOrganizerIds: string[] = DEFAULT_APPROVED_ORGANIZER_IDS;
-  private activeUserId: string = 'user_tg_77201948';
+  private activeUserId: string | null = null;
   private loading: boolean = true;
   private listeners: Set<() => void> = new Set();
   private unsubscribes: (() => void)[] = [];
@@ -153,15 +153,6 @@ class DatabaseService {
   }
 
   private initRealtimeListeners() {
-    try {
-      const savedActiveUser = localStorage.getItem(STORAGE_KEY_ACTIVE_USER);
-      if (savedActiveUser) {
-        this.activeUserId = savedActiveUser;
-      }
-    } catch {
-      // ignore
-    }
-
     let usersLoaded = false;
     let tournamentsLoaded = false;
     let playersLoaded = false;
@@ -294,7 +285,7 @@ class DatabaseService {
             time: data.time || '18:00',
             maxPlayers: typeof data.maxPlayers === 'number' ? data.maxPlayers : 16,
             status: (data.status as TournamentStatus) || 'Upcoming',
-            organizerId: data.organizerId || 'user_tg_88492019',
+            organizerId: data.organizerId || '',
             venueName: data.venueName || 'Main Arena',
             venueLocation: data.venueLocation || data.location || 'Bole Medhanialem, Building 3, 2nd Floor',
             rules: data.rules || 'Standard competitive rules.',
@@ -825,6 +816,24 @@ class DatabaseService {
         favGame: 'eFootball 2026',
       };
 
+      const newUser: User = {
+        id: newUserId,
+        name: fullName,
+        username: username,
+        profileImage: profilePhoto,
+        telegramUserId: `tg_${cleanTgId}`,
+        role: role,
+        gamertag: tgUser.username ? `@${tgUser.username}` : fullName,
+        favGame: 'eFootball 2026',
+      };
+
+      const existingIdx = this.users.findIndex((u) => u.id === newUserId);
+      if (existingIdx >= 0) {
+        this.users[existingIdx] = newUser;
+      } else {
+        this.users.push(newUser);
+      }
+
       setDoc(doc(firestore, 'users', newUserId), newUserDoc).catch((err) =>
         console.error('Failed to create new Telegram user in Firestore:', err)
       );
@@ -834,20 +843,27 @@ class DatabaseService {
     }
   }
 
-  // ACTIVE USER MANAGEMENT
-  public getActiveUser(): User {
+  // ACTIVE USER MANAGEMENT (Fail-closed, strictly verified)
+  public getActiveUser(): User | null {
+    if (!this.activeUserId) return null;
     const user = this.users.find((u) => u.id === this.activeUserId);
-    if (user) return user;
-    if (this.users.length > 0) return this.users[0];
-    return INITIAL_USERS[0];
+    return user || null;
   }
 
-  public setActiveUserId(userId: string) {
+  public setActiveUserId(userId: string | null) {
     this.activeUserId = userId;
-    try {
-      localStorage.setItem(STORAGE_KEY_ACTIVE_USER, userId);
-    } catch {
-      // ignore
+    if (userId) {
+      try {
+        localStorage.setItem(STORAGE_KEY_ACTIVE_USER, userId);
+      } catch {
+        // ignore
+      }
+    } else {
+      try {
+        localStorage.removeItem(STORAGE_KEY_ACTIVE_USER);
+      } catch {
+        // ignore
+      }
     }
     this.notify();
   }
@@ -863,9 +879,7 @@ class DatabaseService {
     } catch {
       // ignore
     }
-    if (this.users.length > 0) {
-      this.activeUserId = this.users[0].id;
-    }
+    this.activeUserId = null;
     this.notify();
   }
 
@@ -1305,37 +1319,113 @@ class DatabaseService {
     }
   }
 
-  public async loginAdminWithFirebase(email: string, pass: string): Promise<boolean> {
-    try {
-      const userCredential = await signInWithEmailAndPassword(auth, email.trim(), pass);
-      const fbUser = userCredential.user;
-      if (!fbUser) return false;
+  private currentLoginAttemptId: number = 0;
 
-      // Associate / update users/admin_1 with firebaseAuthUid
-      const adminDocRef = doc(firestore, 'users', 'admin_1');
-      await setDoc(
-        adminDocRef,
-        {
-          id: 'admin_1',
-          name: 'System Admin',
-          username: 'admin',
-          role: 'ADMIN',
-          firebaseAuthUid: fbUser.uid,
-          email: fbUser.email || email.trim(),
-        },
-        { merge: true }
+  public async loginAdminWithFirebase(email: string, pass: string): Promise<boolean> {
+    const attemptId = ++this.currentLoginAttemptId;
+    try {
+      console.log('[ADMIN LOGIN] Firebase signIn started, attempt =', attemptId);
+      const signInPromise = signInWithEmailAndPassword(auth, email.trim(), pass);
+
+      // Guard against late Firebase resolution after timeout or cancellation
+      signInPromise
+        .then(async () => {
+          if (this.currentLoginAttemptId !== attemptId) {
+            console.log('[ADMIN LOGIN] Late Firebase resolution detected for stale attempt, signing out');
+            try {
+              if (typeof window !== 'undefined') {
+                localStorage.removeItem('tc_admin_session_v2');
+              }
+              await signOut(auth).catch(() => {});
+            } catch {}
+            this.notify();
+          }
+        })
+        .catch(() => {});
+
+      const timeoutPromise = new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error('Sign in request timed out.')), 15000)
       );
 
+      const userCredential = await Promise.race([signInPromise, timeoutPromise]);
+      if (this.currentLoginAttemptId !== attemptId) {
+        // Attempt was superseded or cancelled
+        await signOut(auth).catch(() => {});
+        return false;
+      }
+
+      const fbUser = userCredential.user;
+      if (!fbUser) {
+        console.log('[ADMIN LOGIN] Firebase signIn failed: user is null');
+        return false;
+      }
+      console.log('[ADMIN LOGIN] Firebase signIn succeeded, UID =', fbUser.uid);
+
+      // Immediately establish session metadata so validateAdminSession does not treat this as stale
+      const now = Date.now();
+      try {
+        if (typeof window !== 'undefined') {
+          localStorage.setItem(
+            'tc_admin_session_v2',
+            JSON.stringify({
+              adminUid: fbUser.uid,
+              sessionStartedAt: now,
+              lastActivityAt: now,
+            })
+          );
+        }
+      } catch (err) {
+        console.warn('[ADMIN LOGIN] Non-fatal localStorage error:', err);
+      }
+
+      // Non-blocking sync to Firestore for admin doc
+      try {
+        const adminDocRef = doc(firestore, 'users', 'admin_1');
+        setDoc(
+          adminDocRef,
+          {
+            id: 'admin_1',
+            name: 'System Admin',
+            username: 'admin',
+            role: 'ADMIN',
+            firebaseAuthUid: fbUser.uid,
+            email: fbUser.email || email.trim(),
+          },
+          { merge: true }
+        ).catch((err) => console.warn('[ADMIN LOGIN] Non-fatal admin_1 sync warning:', err));
+      } catch (err) {
+        console.warn('[ADMIN LOGIN] Non-fatal admin doc error:', err);
+      }
+
+      console.log('[ADMIN LOGIN] login complete');
       this.notify();
       return true;
     } catch (err: any) {
-      console.error('Firebase Admin Authentication error:', err);
+      console.error('[ADMIN LOGIN] login failed =', err?.message || err);
+      // Invalidate attempt ID so any late resolution is rejected
+      if (this.currentLoginAttemptId === attemptId) {
+        this.currentLoginAttemptId++;
+      }
+      try {
+        if (typeof window !== 'undefined') {
+          localStorage.removeItem('tc_admin_session_v2');
+        }
+        await signOut(auth).catch(() => {});
+      } catch {}
+      this.notify();
       return false;
     }
   }
 
   public async logoutAdminWithFirebase(): Promise<void> {
     try {
+      if (typeof window !== 'undefined') {
+        try {
+          localStorage.removeItem('tc_admin_session_v2');
+          sessionStorage.removeItem('tc_admin_session_started_at');
+          sessionStorage.removeItem('tc_admin_last_activity_at');
+        } catch {}
+      }
       await signOut(auth);
     } catch (err) {
       console.error('Firebase signOut error:', err);

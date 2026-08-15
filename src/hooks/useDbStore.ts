@@ -3,7 +3,7 @@ import { db } from '../services/db';
 import { User } from '../types';
 
 export function useDbStore() {
-  const [activeUser, setActiveUser] = useState<User>(db.getActiveUser());
+  const [activeUser, setActiveUser] = useState<User | null>(db.getActiveUser());
   const [users, setUsers] = useState<User[]>(db.getUsers());
   const [tournaments, setTournaments] = useState(db.getTournaments());
   const [loading, setLoading] = useState(db.isLoading());

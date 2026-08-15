@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Send, ExternalLink } from 'lucide-react';
+import { Send, ExternalLink, ShieldCheck, AlertTriangle } from 'lucide-react';
 import { useDbStore } from './hooks/useDbStore';
 import { NavTab, Tournament } from './types';
 import { db } from './services/db';
@@ -23,6 +23,8 @@ import { OrganizerProfile } from './components/organizer/OrganizerProfile';
 
 export default function App() {
   const { activeUser, loading, tournaments } = useDbStore();
+  const [authStatus, setAuthStatus] = useState<'AUTHENTICATING' | 'AUTHENTICATED' | 'AUTH_ERROR'>('AUTHENTICATING');
+  const [authErrorMessage, setAuthErrorMessage] = useState<string>('');
   const [activeTab, setActiveTab] = useState<NavTab>('home');
   const [organizerPanelSubTab, setOrganizerPanelSubTab] = useState<
     'tournaments' | 'create_tour' | 'players' | 'matches' | 'results' | 'progress'
@@ -40,13 +42,56 @@ export default function App() {
     handleTabChange('tournaments');
   };
 
-  // Auto-authenticate when opened inside Telegram WebApp
+  // Cryptographically authenticate when opened inside Telegram WebApp
   useEffect(() => {
-    if (!isInsideTelegram) return;
-    telegramService.autoAuthenticateWithTelegram().catch((err) => {
-      console.warn('Telegram auto-authentication notice:', err);
-    });
+    if (!isInsideTelegram) {
+      setAuthStatus('AUTH_ERROR');
+      return;
+    }
+
+    let isMounted = true;
+    setAuthStatus('AUTHENTICATING');
+
+    telegramService
+      .autoAuthenticateWithTelegram()
+      .then((res) => {
+        if (!isMounted) return;
+        if (res.success) {
+          setAuthStatus('AUTHENTICATED');
+        } else {
+          setAuthStatus('AUTH_ERROR');
+          setAuthErrorMessage(res.error || 'Could not verify your Telegram account.');
+        }
+      })
+      .catch((err) => {
+        if (!isMounted) return;
+        setAuthStatus('AUTH_ERROR');
+        setAuthErrorMessage(err?.message || 'Authentication failed.');
+      });
+
+    return () => {
+      isMounted = false;
+    };
   }, [isInsideTelegram]);
+
+  const handleRetryAuth = () => {
+    setAuthStatus('AUTHENTICATING');
+    setAuthErrorMessage('');
+    telegramService
+      .autoAuthenticateWithTelegram()
+      .then((res) => {
+        if (res.success) {
+          setAuthStatus('AUTHENTICATED');
+        } else {
+          setAuthStatus('AUTH_ERROR');
+          setAuthErrorMessage(res.error || 'Could not verify your Telegram account.');
+        }
+      })
+      .catch((err) => {
+        setAuthStatus('AUTH_ERROR');
+        setAuthErrorMessage(err?.message || 'Authentication failed.');
+      });
+  };
 
   // Handle Telegram Direct Mini App startapp deep links (e.g. startapp=tour_1786298912734)
   useEffect(() => {
@@ -69,16 +114,6 @@ export default function App() {
     }
   }, [loading, tournaments, handledDeepLink]);
 
-  // If role is switched from Organizer to Player while on 'organizer_panel', fallback to 'home'
-  if (activeUser.role === 'PLAYER' && activeTab === 'organizer_panel') {
-    setActiveTab('home');
-  }
-
-  // If role is ORGANIZER and activeTab is 'tournaments', redirect to 'organizer_panel' unless viewing a specific tournament overview
-  if (activeUser.role === 'ORGANIZER' && activeTab === 'tournaments' && !selectedTournamentForOverview) {
-    setActiveTab('organizer_panel');
-  }
-
   const handleOpenPanelWithTab = (
     subTab: 'create_tour' | 'players' | 'matches' | 'results' | 'progress'
   ) => {
@@ -97,6 +132,7 @@ export default function App() {
     telegramService.triggerHaptic('warning');
   };
 
+  // 1. Outside Telegram Guard
   if (!isInsideTelegram) {
     return (
       <div className="min-h-screen bg-slate-950 text-slate-100 font-sans antialiased selection:bg-sky-500 selection:text-white flex items-center justify-center p-4">
@@ -124,6 +160,69 @@ export default function App() {
         </div>
       </div>
     );
+  }
+
+  // 2. Cryptographic Authentication In-Progress State (Neutral, no mock identity)
+  if (authStatus === 'AUTHENTICATING' || (!activeUser && authStatus !== 'AUTH_ERROR')) {
+    return (
+      <div className="min-h-screen bg-slate-950 text-slate-100 font-sans antialiased selection:bg-sky-500 selection:text-white flex items-center justify-center p-4">
+        <div className="w-full max-w-sm bg-slate-900 border border-slate-800 rounded-3xl p-8 text-center space-y-5 shadow-2xl">
+          <div className="w-14 h-14 bg-sky-500/10 border border-sky-500/20 text-sky-400 rounded-2xl flex items-center justify-center mx-auto animate-pulse">
+            <ShieldCheck className="w-7 h-7" />
+          </div>
+          <div className="space-y-2">
+            <div className="text-xs font-bold uppercase tracking-widest text-sky-400">AUTHENTICATING</div>
+            <h2 className="text-base font-bold text-slate-100">Verifying Telegram account...</h2>
+            <p className="text-xs text-slate-400 leading-relaxed">
+              Securing cryptographic session with Telegram.
+            </p>
+          </div>
+          <div className="flex justify-center pt-2">
+            <div className="w-6 h-6 border-2 border-sky-400 border-t-transparent rounded-full animate-spin" />
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // 3. Authentication Failed State
+  if (authStatus === 'AUTH_ERROR' && !activeUser) {
+    return (
+      <div className="min-h-screen bg-slate-950 text-slate-100 font-sans antialiased selection:bg-sky-500 selection:text-white flex items-center justify-center p-4">
+        <div className="w-full max-w-sm bg-slate-900 border border-red-500/20 rounded-3xl p-6 text-center space-y-5 shadow-2xl">
+          <div className="w-14 h-14 bg-red-500/10 border border-red-500/20 text-red-400 rounded-2xl flex items-center justify-center mx-auto">
+            <AlertTriangle className="w-7 h-7" />
+          </div>
+          <div className="space-y-2">
+            <h2 className="text-base font-bold text-slate-100">Verification Required</h2>
+            <p className="text-xs text-slate-400 leading-relaxed">
+              {authErrorMessage || 'Could not verify your Telegram signature. Please reopen the Mini App from Telegram or try again.'}
+            </p>
+          </div>
+          <button
+            onClick={handleRetryAuth}
+            className="w-full py-3 px-4 bg-sky-500 hover:bg-sky-400 text-slate-950 font-extrabold rounded-2xl transition-all shadow-lg text-sm active:scale-95"
+          >
+            Retry Verification
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  // Absolute safety check: Never render user-scoped UI if activeUser is null
+  if (!activeUser) {
+    return null;
+  }
+
+  // If role is switched from Organizer to Player while on 'organizer_panel', fallback to 'home'
+  if (activeUser.role === 'PLAYER' && activeTab === 'organizer_panel') {
+    setActiveTab('home');
+  }
+
+  // If role is ORGANIZER and activeTab is 'tournaments', redirect to 'organizer_panel' unless viewing a specific tournament overview
+  if (activeUser.role === 'ORGANIZER' && activeTab === 'tournaments' && !selectedTournamentForOverview) {
+    setActiveTab('organizer_panel');
   }
 
   return (

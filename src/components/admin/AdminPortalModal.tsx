@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { db } from '../../services/db';
+import { useAdminSession, AdminLogoutReason, validateAdminSession } from '../../hooks/useAdminSession';
 import { User, UserRole, WithdrawalRequest } from '../../types';
 import {
   ShieldCheck,
@@ -38,11 +39,42 @@ export const AdminPortalModal: React.FC<AdminPortalModalProps> = ({ isOpen, onCl
   const [loginError, setLoginError] = useState('');
   const [isSubmittingLogin, setIsSubmittingLogin] = useState(false);
 
+  // Hook for 30-minute inactivity timeout, 25-minute warning countdown, and 12-hour max lifetime
+  const {
+    sessionState,
+    logoutReason,
+    remainingWarningSeconds,
+    isWarningVisible,
+    isSessionValid,
+    staySignedIn,
+    logout,
+    initSession,
+    clearLogoutReason,
+  } = useAdminSession(
+    isOpen,
+    (_reason: AdminLogoutReason) => {
+      setIsAuthenticated(false);
+    },
+    isSubmittingLogin
+  );
+
   useEffect(() => {
-    if (isOpen) {
-      setIsAuthenticated(db.isFirebaseAdminAuthenticated());
+    if (isOpen && !isSubmittingLogin) {
+      const fbUser = db.getAdminAuthUser();
+      const validation = validateAdminSession(fbUser);
+      if (validation.isValid) {
+        setIsAuthenticated(true);
+        clearLogoutReason();
+      } else {
+        setIsAuthenticated(false);
+        if (fbUser && db.isFirebaseAdminAuthenticated()) {
+          db.logoutAdminWithFirebase();
+        }
+      }
     }
-  }, [isOpen]);
+  }, [isOpen, isSubmittingLogin, clearLogoutReason]);
+
+  const showProtectedContent = isAuthenticated && isSessionValid && db.isFirebaseAdminAuthenticated() && !isSubmittingLogin;
 
   const [activeTab, setActiveTab] = useState<'users' | 'organizers' | 'tournaments' | 'withdrawals' | 'registration_requests'>(
     'users'
@@ -134,19 +166,36 @@ export const AdminPortalModal: React.FC<AdminPortalModalProps> = ({ isOpen, onCl
       setLoginError('Invalid email or password.');
       return;
     }
+    console.log('[ADMIN LOGIN] submit');
     setIsSubmittingLogin(true);
     setLoginError('');
     try {
       const isValid = await db.loginAdminWithFirebase(adminEmailInput.trim(), adminPasswordInput);
-      if (isValid) {
+      const fbUser = db.getAdminAuthUser();
+      const isAdmin = db.isFirebaseAdminAuthenticated();
+
+      console.log('[ADMIN LOGIN] admin verification =', isAdmin);
+      if (isValid && fbUser && isAdmin) {
+        console.log('[ADMIN LOGIN] UID =', fbUser.uid);
+        console.log('[ADMIN LOGIN] creating session metadata');
+        initSession(fbUser.uid);
+        console.log('[ADMIN LOGIN] session validation =', validateAdminSession(fbUser).isValid);
         setIsAuthenticated(true);
+        console.log('[ADMIN LOGIN] authenticated = true');
+        console.log('[ADMIN LOGIN] login complete');
         setLoginError('');
         setAdminPasswordInput('');
       } else {
+        console.log('[ADMIN LOGIN] login failed = invalid credentials or unauthorized');
+        setIsAuthenticated(false);
         setLoginError('Invalid email or password.');
+        await db.logoutAdminWithFirebase().catch(() => {});
       }
-    } catch {
+    } catch (err: any) {
+      console.error('[ADMIN LOGIN] login failed =', err?.message || err);
+      setIsAuthenticated(false);
       setLoginError('Invalid email or password.');
+      await db.logoutAdminWithFirebase().catch(() => {});
     } finally {
       setIsSubmittingLogin(false);
     }
@@ -275,10 +324,10 @@ export const AdminPortalModal: React.FC<AdminPortalModalProps> = ({ isOpen, onCl
           </div>
 
           <div className="flex items-center gap-2">
-            {isAuthenticated && (
+            {showProtectedContent && (
               <button
                 onClick={async () => {
-                  await db.logoutAdminWithFirebase();
+                  await logout('MANUAL');
                   setIsAuthenticated(false);
                   setAdminEmailInput('');
                   setAdminPasswordInput('');
@@ -300,7 +349,7 @@ export const AdminPortalModal: React.FC<AdminPortalModalProps> = ({ isOpen, onCl
         </div>
 
         {/* AUTHENTICATION VIEW */}
-        {!isAuthenticated ? (
+        {!showProtectedContent ? (
           <div className="p-8 max-w-md mx-auto space-y-6 text-center">
             <div className="w-14 h-14 bg-amber-500/10 border border-amber-500/30 rounded-full flex items-center justify-center mx-auto text-amber-400">
               <Lock className="w-7 h-7" />
@@ -312,6 +361,20 @@ export const AdminPortalModal: React.FC<AdminPortalModalProps> = ({ isOpen, onCl
                 Sign in with your administrator email and password to access system management.
               </p>
             </div>
+
+            {/* Contextual Session Expiry Notice */}
+            {logoutReason === 'INACTIVITY' && (
+              <div className="p-3.5 bg-amber-500/10 border border-amber-500/30 rounded-2xl text-xs text-amber-300 flex items-center gap-2.5 text-left animate-in fade-in duration-200">
+                <Clock className="w-4 h-4 text-amber-400 shrink-0" />
+                <span>Your admin session expired due to inactivity. Please sign in again.</span>
+              </div>
+            )}
+            {logoutReason === 'MAX_DURATION' && (
+              <div className="p-3.5 bg-amber-500/10 border border-amber-500/30 rounded-2xl text-xs text-amber-300 flex items-center gap-2.5 text-left animate-in fade-in duration-200">
+                <Clock className="w-4 h-4 text-amber-400 shrink-0" />
+                <span>Your admin session expired after reaching the maximum session duration. Please sign in again.</span>
+              </div>
+            )}
 
             <form onSubmit={handleLogin} className="space-y-4 text-left">
               <div>
@@ -1736,10 +1799,51 @@ export const AdminPortalModal: React.FC<AdminPortalModalProps> = ({ isOpen, onCl
               </div>
               <button
                 onClick={() => setPreviewScreenshotUrl(null)}
-                className="w-full py-2.5 bg-slate-800 hover:bg-slate-700 text-slate-200 font-extrabold text-xs rounded-xl border border-slate-700"
+                className="w-full py-2.5 bg-slate-800 hover:bg-slate-750 text-slate-200 font-extrabold text-xs rounded-xl border border-slate-700"
               >
                 Close Preview
               </button>
+            </div>
+          </div>
+        )}
+
+        {/* INACTIVITY WARNING MODAL OVERLAY (5-MINUTE EXPIRATION NOTICE) */}
+        {isWarningVisible && (
+          <div className="fixed inset-0 z-70 bg-slate-950/85 backdrop-blur-md flex items-center justify-center p-4">
+            <div className="bg-slate-900 border border-amber-500/40 rounded-3xl p-6 sm:p-7 max-w-md w-full text-center space-y-5 shadow-2xl shadow-amber-500/10">
+              <div className="w-14 h-14 bg-amber-500/15 border border-amber-500/30 text-amber-400 rounded-2xl flex items-center justify-center mx-auto animate-pulse">
+                <AlertTriangle className="w-7 h-7" />
+              </div>
+              <div className="space-y-2">
+                <div className="text-[11px] font-extrabold uppercase tracking-widest text-amber-400">
+                  Security Inactivity Notice
+                </div>
+                <h3 className="text-lg font-bold text-white">Your admin session is about to expire</h3>
+                <p className="text-xs text-slate-300 leading-relaxed">
+                  Your session will expire in{' '}
+                  <span className="font-mono font-black text-amber-400 text-sm bg-amber-500/10 px-2 py-0.5 rounded-lg border border-amber-500/20">
+                    {Math.floor(remainingWarningSeconds / 60)}:
+                    {(remainingWarningSeconds % 60).toString().padStart(2, '0')}
+                  </span>{' '}
+                  due to inactivity.
+                </p>
+              </div>
+              <div className="pt-2 space-y-2">
+                <button
+                  onClick={staySignedIn}
+                  className="w-full py-3 bg-amber-500 hover:bg-amber-400 text-slate-950 font-extrabold rounded-2xl text-sm transition-all shadow-lg active:scale-95 flex items-center justify-center gap-2"
+                >
+                  <ShieldCheck className="w-4 h-4" />
+                  Stay Signed In
+                </button>
+                <button
+                  onClick={() => logout('MANUAL')}
+                  className="w-full py-2.5 bg-slate-800 hover:bg-slate-750 text-slate-400 hover:text-slate-200 font-bold rounded-2xl text-xs transition-colors flex items-center justify-center gap-1.5"
+                >
+                  <LogOut className="w-3.5 h-3.5" />
+                  Sign Out Now
+                </button>
+              </div>
             </div>
           </div>
         )}
@@ -1747,3 +1851,4 @@ export const AdminPortalModal: React.FC<AdminPortalModalProps> = ({ isOpen, onCl
     </div>
   );
 };
+

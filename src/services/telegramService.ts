@@ -166,72 +166,73 @@ class TelegramService {
   }
 
   /**
-   * Automatic auth process:
+   * Cryptographically authenticate current Telegram WebApp user session:
    * 1. Retrieve raw Telegram WebApp initData string
    * 2. Send to backend endpoint POST /api/auth/telegram for HMAC verification
-   * 3. Receive Firebase Custom Token and authenticate via signInWithCustomToken
-   * 4. Process Telegram User profile in Firestore/db
+   * 3. Clear any stale mismatched Firebase Auth session
+   * 4. Receive Firebase Custom Token and authenticate via signInWithCustomToken
+   * 5. Process Telegram User profile in Firestore/db
+   * Fails closed: Never falls back to mock/synthetic identities.
    */
-  public async autoAuthenticateWithTelegram(): Promise<{ success: boolean; isNewUser: boolean; roleGiven: string }> {
+  public async autoAuthenticateWithTelegram(): Promise<{ success: boolean; isNewUser?: boolean; roleGiven?: string; error?: string }> {
     if (!this.isInsideTelegram()) {
-      return { success: false, isNewUser: false, roleGiven: 'PLAYER' };
+      return { success: false, error: 'NOT_INSIDE_TELEGRAM' };
     }
 
     const initData = typeof window !== 'undefined' ? window.Telegram?.WebApp?.initData : undefined;
-    const user = this.getTelegramUser();
+    if (!initData || !initData.trim()) {
+      return { success: false, error: 'MISSING_INIT_DATA' };
+    }
 
     try {
       const response = await fetch('/api/auth/telegram', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          initData: initData || undefined,
-          simulationUserId: user ? String(user.id) : '88492019',
+          initData: initData.trim(),
         }),
       });
 
-      if (response.ok) {
-        const result = await response.json();
-        if (result.success) {
-          if (result.customToken && !db.isFirebaseAdminAuthenticated()) {
-            try {
-              await signInWithCustomToken(auth, result.customToken);
-            } catch (signInErr) {
-              console.warn('signInWithCustomToken failed, falling back to anonymous auth:', signInErr);
-              if (!auth.currentUser) {
-                await signInAnonymously(auth).catch(() => {});
-              }
-            }
-          } else if (!auth.currentUser && !db.isFirebaseAdminAuthenticated()) {
-            await signInAnonymously(auth).catch(() => {});
-          }
-
-          const verifiedTgUser: TelegramUser = result.user || user || {
-            id: 88492019,
-            first_name: 'Natnael',
-            username: 'natnael_tg',
-          };
-          const res = db.processTelegramUser(verifiedTgUser);
-          return { success: true, ...res };
-        }
+      if (!response.ok) {
+        const errData = await response.json().catch(() => ({}));
+        return { success: false, error: errData.error || 'AUTH_SERVER_ERROR' };
       }
-    } catch (err) {
-      console.warn('Backend Telegram authentication failed, falling back to local user processing:', err);
+
+      const result = await response.json();
+      if (result.success && result.user) {
+        // Clear any stale Firebase Auth session belonging to another identity
+        if (auth.currentUser && result.uid && auth.currentUser.uid !== result.uid && !db.isFirebaseAdminAuthenticated()) {
+          try {
+            await auth.signOut();
+          } catch (signOutErr) {
+            console.warn('Notice signing out stale Firebase session:', signOutErr);
+          }
+        }
+
+        // Sign in with verified Custom Token
+        if (result.customToken && !db.isFirebaseAdminAuthenticated()) {
+          try {
+            await signInWithCustomToken(auth, result.customToken);
+          } catch (signInErr) {
+            console.warn('signInWithCustomToken notice:', signInErr);
+            if (!auth.currentUser) {
+              await signInAnonymously(auth).catch(() => {});
+            }
+          }
+        } else if (!auth.currentUser && !db.isFirebaseAdminAuthenticated()) {
+          await signInAnonymously(auth).catch(() => {});
+        }
+
+        const verifiedTgUser: TelegramUser = result.user;
+        const res = db.processTelegramUser(verifiedTgUser);
+        return { success: true, ...res };
+      } else {
+        return { success: false, error: result.error || 'INVALID_AUTH_RESPONSE' };
+      }
+    } catch (err: any) {
+      console.error('Telegram authentication request failed:', err);
+      return { success: false, error: err?.message || 'NETWORK_AUTH_ERROR' };
     }
-
-    // Fallback for simulation mode or when initData is not available
-    if (!auth.currentUser && !db.isFirebaseAdminAuthenticated()) {
-      await signInAnonymously(auth).catch(() => {});
-    }
-
-    const fallbackUser = user || {
-      id: 88492019,
-      first_name: 'Natnael',
-      username: 'natnael_tg',
-    };
-
-    const result = db.processTelegramUser(fallbackUser);
-    return { success: true, ...result };
   }
 }
 

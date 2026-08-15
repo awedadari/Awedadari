@@ -38,13 +38,11 @@ export const TelegramBotModal: React.FC<TelegramBotModalProps> = ({
   const [organizerActionMsg, setOrganizerActionMsg] = useState('');
 
   // Custom Telegram Auth Simulation State
-  const [simTgId, setSimTgId] = useState('88492019');
-  const [simFirstName, setSimFirstName] = useState('Marcus');
-  const [simLastName, setSimLastName] = useState('Vane');
-  const [simUsername, setSimUsername] = useState('marcus_esports');
-  const [simPhotoUrl, setSimPhotoUrl] = useState(
-    'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=150'
-  );
+  const [simTgId, setSimTgId] = useState('');
+  const [simFirstName, setSimFirstName] = useState('');
+  const [simLastName, setSimLastName] = useState('');
+  const [simUsername, setSimUsername] = useState('');
+  const [simPhotoUrl, setSimPhotoUrl] = useState('');
   const [simSuccessMsg, setSimSuccessMsg] = useState('');
 
   if (!isOpen) return null;

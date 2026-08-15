@@ -115,80 +115,72 @@ async function startServer() {
   // Secure Telegram Authentication Endpoint
   app.post('/api/auth/telegram', async (req, res) => {
     try {
-      const { initData, simulationUserId } = req.body || {};
+      const { initData } = req.body || {};
 
-      let cleanTgId = '88492019';
-      let tgUser: any = null;
-
-      if (initData && typeof initData === 'string') {
-        const params = new URLSearchParams(initData);
-        const hash = params.get('hash');
-        if (hash) {
-          params.delete('hash');
-
-          // Sort remaining key/value pairs alphabetically
-          const sortedKeys = Array.from(params.keys()).sort();
-          const dataCheckArr: string[] = [];
-          for (const key of sortedKeys) {
-            dataCheckArr.push(`${key}=${params.get(key)}`);
-          }
-          const dataCheckString = dataCheckArr.join('\n');
-
-          // HMAC verification if TELEGRAM_BOT_TOKEN is set
-          const botToken = process.env.TELEGRAM_BOT_TOKEN;
-          if (botToken) {
-            const secretKey = crypto.createHmac('sha256', 'WebAppData').update(botToken).digest();
-            const calculatedHash = crypto.createHmac('sha256', secretKey).update(dataCheckString).digest('hex');
-
-            const hashBuf = Buffer.from(hash, 'hex');
-            const calcBuf = Buffer.from(calculatedHash, 'hex');
-
-            if (hashBuf.length !== calcBuf.length || !crypto.timingSafeEqual(hashBuf, calcBuf)) {
-              return res.status(401).json({ success: false, error: 'Invalid Telegram initData signature' });
-            }
-          } else {
-            console.warn('TELEGRAM_BOT_TOKEN environment variable not set. Bypassing HMAC check for local development.');
-          }
-
-          // Check auth_date timestamp (max 24 hours / 86400 seconds)
-          const authDateStr = params.get('auth_date');
-          const authDate = parseInt(authDateStr || '0', 10);
-          const now = Math.floor(Date.now() / 1000);
-          const MAX_AGE = 86400; // 24 hours max age
-          if (authDate > 0 && botToken && now - authDate > MAX_AGE) {
-            return res.status(401).json({ success: false, error: 'Telegram initData authentication timestamp expired' });
-          }
-
-          // Extract user object
-          const userStr = params.get('user');
-          if (userStr) {
-            try {
-              tgUser = JSON.parse(userStr);
-            } catch {
-              // ignore
-            }
-          }
-
-          if (tgUser && tgUser.id) {
-            cleanTgId = String(tgUser.id).replace(/^tg_/, '');
-          }
-        }
-      } else if (simulationUserId) {
-        cleanTgId = String(simulationUserId).replace(/^tg_/, '');
-        tgUser = {
-          id: cleanTgId,
-          first_name: 'Natnael',
-          username: 'natnael_tg',
-        };
-      } else {
-        cleanTgId = '88492019';
-        tgUser = {
-          id: cleanTgId,
-          first_name: 'Natnael',
-          username: 'natnael_tg',
-        };
+      if (!initData || typeof initData !== 'string' || !initData.trim()) {
+        return res.status(400).json({ success: false, error: 'Missing Telegram initData for authentication' });
       }
 
+      const params = new URLSearchParams(initData.trim());
+      const hash = params.get('hash');
+      if (!hash) {
+        return res.status(400).json({ success: false, error: 'Missing hash signature in Telegram initData' });
+      }
+
+      params.delete('hash');
+
+      // Sort remaining key/value pairs alphabetically
+      const sortedKeys = Array.from(params.keys()).sort();
+      const dataCheckArr: string[] = [];
+      for (const key of sortedKeys) {
+        dataCheckArr.push(`${key}=${params.get(key)}`);
+      }
+      const dataCheckString = dataCheckArr.join('\n');
+
+      // Cryptographic HMAC-SHA256 verification using TELEGRAM_BOT_TOKEN
+      const botToken = process.env.TELEGRAM_BOT_TOKEN;
+      if (!botToken) {
+        console.error('TELEGRAM_BOT_TOKEN is not configured on the server.');
+        return res.status(500).json({ success: false, error: 'Server authentication misconfigured: missing bot token' });
+      }
+
+      const secretKey = crypto.createHmac('sha256', 'WebAppData').update(botToken).digest();
+      const calculatedHash = crypto.createHmac('sha256', secretKey).update(dataCheckString).digest('hex');
+
+      const hashBuf = Buffer.from(hash, 'hex');
+      const calcBuf = Buffer.from(calculatedHash, 'hex');
+
+      if (hashBuf.length !== calcBuf.length || !crypto.timingSafeEqual(hashBuf, calcBuf)) {
+        return res.status(401).json({ success: false, error: 'Invalid Telegram cryptographic signature' });
+      }
+
+      // Check auth_date timestamp (max 24 hours / 86400 seconds)
+      const authDateStr = params.get('auth_date');
+      const authDate = parseInt(authDateStr || '0', 10);
+      const now = Math.floor(Date.now() / 1000);
+      const MAX_AGE = 86400; // 24 hours max age
+      if (authDate > 0 && now - authDate > MAX_AGE) {
+        return res.status(401).json({ success: false, error: 'Telegram authentication session expired' });
+      }
+
+      // Extract verified user payload
+      const userStr = params.get('user');
+      if (!userStr) {
+        return res.status(400).json({ success: false, error: 'Missing user payload in verified Telegram initData' });
+      }
+
+      let tgUser: any = null;
+      try {
+        tgUser = JSON.parse(userStr);
+      } catch {
+        return res.status(400).json({ success: false, error: 'Malformed user payload in Telegram initData' });
+      }
+
+      if (!tgUser || !tgUser.id) {
+        return res.status(400).json({ success: false, error: 'Missing user ID in verified Telegram user payload' });
+      }
+
+      const cleanTgId = String(tgUser.id).replace(/^tg_/, '').trim();
       const firebaseUid = `tg_${cleanTgId}`;
 
       let customToken: string | null = null;
@@ -198,7 +190,8 @@ async function startServer() {
           telegramUserId: cleanTgId,
         });
       } catch (tokenErr: any) {
-        // Firebase Admin custom token generation bypassed when signBlob permission is omitted in sandbox
+        // Log error if Firebase custom token generation fails in sandbox
+        console.warn('Firebase Custom Token creation notice:', tokenErr?.message);
       }
 
       return res.json({
