@@ -250,3 +250,24 @@ export function generateTournamentMiniAppDeepLink(
   return `https://t.me/${botUsername}?startapp=${encodedId}`;
 }
 
+/**
+ * Reusable Direct Mini App Deep Link generator for the HOME tab
+ * e.g. https://t.me/Awedadari_bot?startapp=home
+ */
+export function generateHomeMiniAppDeepLink(
+  botUsername: string = TELEGRAM_BOT_DEFAULT.botUsername
+): string {
+  return `https://t.me/${botUsername}?startapp=home`;
+}
+
+/**
+ * Reusable Direct Mini App Deep Link generator for the TOURNAMENTS tab
+ * e.g. https://t.me/Awedadari_bot?startapp=tournaments
+ */
+export function generateTournamentsMiniAppDeepLink(
+  botUsername: string = TELEGRAM_BOT_DEFAULT.botUsername
+): string {
+  return `https://t.me/${botUsername}?startapp=tournaments`;
+}
+
+

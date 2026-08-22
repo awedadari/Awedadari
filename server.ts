@@ -9,7 +9,10 @@ import { getFirestore } from 'firebase-admin/firestore';
 import { createServer as createViteServer } from 'vite';
 
 const firebaseConfigPath = path.join(process.cwd(), 'firebase-applet-config.json');
-let firebaseConfig: { projectId: string; firestoreDatabaseId?: string } = { projectId: 'tewedadari-app' };
+let firebaseConfig: { projectId: string; firestoreDatabaseId?: string } = {
+  projectId: 'tewedadari-app',
+  firestoreDatabaseId: 'ai-studio-awedadari-ddabb8ef-399f-49bf-88e8-cb12c59537e1',
+};
 if (fs.existsSync(firebaseConfigPath)) {
   try {
     firebaseConfig = JSON.parse(fs.readFileSync(firebaseConfigPath, 'utf8'));
@@ -28,7 +31,7 @@ function ensureFirebaseAdmin() {
 
 function getAdminFirestore() {
   ensureFirebaseAdmin();
-  const rawDbId = firebaseConfig.firestoreDatabaseId;
+  const rawDbId = firebaseConfig.firestoreDatabaseId || 'ai-studio-awedadari-ddabb8ef-399f-49bf-88e8-cb12c59537e1';
   const dbId = rawDbId && rawDbId !== '(default)' ? rawDbId : undefined;
   const app = getApps()[0];
   return dbId ? getFirestore(app, dbId) : getFirestore(app);
@@ -417,8 +420,17 @@ async function startServer() {
     app.use(vite.middlewares);
   } else {
     const distPath = path.join(process.cwd(), 'dist');
-    app.use(express.static(distPath));
+    app.use(
+      express.static(distPath, {
+        setHeaders: (res, filePath) => {
+          if (filePath.endsWith('.html')) {
+            res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+          }
+        },
+      })
+    );
     app.get('*', (_req, res) => {
+      res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
       res.sendFile(path.join(distPath, 'index.html'));
     });
   }

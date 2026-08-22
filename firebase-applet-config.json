@@ -4,5 +4,6 @@
   "apiKey": "AIzaSyCNm4zuzPUN-oOZcCCCW9WEreut2rjq7V4",
   "authDomain": "tewedadari-app.firebaseapp.com",
   "storageBucket": "tewedadari-app.firebasestorage.app",
-  "messagingSenderId": "288103242176"
+  "messagingSenderId": "288103242176",
+  "firestoreDatabaseId": "ai-studio-awedadari-ddabb8ef-399f-49bf-88e8-cb12c59537e1"
 }

@@ -721,6 +721,16 @@ export const OrganizerPanel: React.FC<OrganizerPanelProps> = ({ user }) => {
   });
   const [selectedDeskTourId, setSelectedDeskTourId] = useState<string | null>(null);
 
+  useEffect(() => {
+    if (selectedDeskTourId) {
+      db.subscribeToTournament(selectedDeskTourId);
+    }
+  }, [selectedDeskTourId]);
+
+  useEffect(() => {
+    db.loadCompletedTournaments();
+  }, []);
+
   const activeTournament = selectedDeskTourId ? db.getTournamentById(selectedDeskTourId) || null : null;
 
   const isTourCompleted = activeTournament?.status === 'Completed' || activeTournament?.status === 'Finished';
@@ -1308,9 +1318,16 @@ export const OrganizerPanel: React.FC<OrganizerPanelProps> = ({ user }) => {
                             />
                             <div className="flex-1 min-w-0">
                               <div className="flex items-center justify-between gap-2">
-                                <span className="text-[10px] font-black text-sky-400 uppercase tracking-wider">
-                                  {t.game}
-                                </span>
+                                <div className="flex items-center gap-1.5">
+                                  <span className="text-[10px] font-black text-sky-400 uppercase tracking-wider">
+                                    {t.game}
+                                  </span>
+                                  {t.tournamentCode && (
+                                    <span className="font-mono text-[9px] font-black text-amber-400 bg-amber-500/10 px-1.5 py-0.2 rounded border border-amber-500/20">
+                                      #{t.tournamentCode}
+                                    </span>
+                                  )}
+                                </div>
 
                                 {/* Status Badge */}
                                 {!t.isApproved ? (

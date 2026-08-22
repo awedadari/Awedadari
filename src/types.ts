@@ -49,6 +49,44 @@ export interface FinalStanding {
   badge?: string; // "Champion", "Runner-up", "Third Place", "MVP", or custom text
 }
 
+export interface PlayerGameStats {
+  gameKey: string;
+  gameName: string;
+  rating: number; // e.g. 1045
+  tournamentsPlayed: number;
+  wins: number; // 1st place finishes
+  runnerUps: number; // 2nd place finishes
+  thirdPlaces: number; // 3rd place finishes
+  podiums: number; // 1st, 2nd, 3rd
+  top8: number; // 1st-8th place finishes
+  bestFinishRank: number | null; // 1, 2, 3...
+  bestFinishLabel: string; // "#1", "#2", "N/A"
+  averageFinish: string; // "2.3", "N/A"
+  earnedPointsTotal: number;
+  ranksList: number[];
+}
+
+export interface RankedPlayerGameProfile {
+  user: User;
+  globalRank: number;
+  gameKey: string;
+  gameName: string;
+  stats: PlayerGameStats;
+  rankPoints: number; // alias for stats.rating
+  eventsPlayed: number; // alias for stats.tournamentsPlayed
+  wins: number; // alias for stats.wins
+  top3: number; // alias for stats.podiums
+  bestFinishLabel: string; // alias for stats.bestFinishLabel
+}
+
+export interface GameCategoryInfo {
+  key: string;
+  name: string;
+  icon: string;
+  completedTournamentsCount: number;
+  totalTournamentsCount: number;
+}
+
 export interface SessionPlayerScore {
   userId: string;
   points: number;
@@ -65,6 +103,7 @@ export interface TournamentSession {
 
 export interface Tournament {
   id: string;
+  tournamentCode?: string; // 4-digit unique sequential code (e.g. "0001", "0047")
   tournamentName: string;
   game: string; // Custom free text!
   image: string;

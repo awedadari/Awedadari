@@ -52,7 +52,7 @@ export const BottomNav: React.FC<BottomNavProps> = ({ role, activeTab, onTabChan
           </button>
         )}
 
-        {/* Players Leaderboard Tab */}
+        {/* Leaderboard Tab */}
         <button
           onClick={() => handleNavClick('players')}
           className={`relative flex flex-col items-center justify-center gap-1 min-h-[44px] px-3 py-1.5 rounded-2xl transition-all active:scale-95 ${
@@ -65,7 +65,7 @@ export const BottomNav: React.FC<BottomNavProps> = ({ role, activeTab, onTabChan
             <span className="absolute -top-1.5 w-6 h-1 bg-emerald-400 rounded-full shadow-xs shadow-emerald-400/50" />
           )}
           <Users className="w-5 h-5" />
-          <span className="text-[11px] font-semibold">Players</span>
+          <span className="text-[11px] font-semibold">Leaderboard</span>
         </button>
 
         {/* Organizer Panel (ONLY for ORGANIZER role) */}

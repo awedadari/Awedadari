@@ -16,10 +16,11 @@ export const InviteModal: React.FC<InviteModalProps> = ({ tournament, onClose })
   
   const tourAward = tournament.award?.trim() || tournament.prizePool?.trim();
   const awardLine = tourAward ? `\n🏆 Tournament Award: ${tourAward}` : '';
+  const codeLine = tournament.tournamentCode ? `\n🔢 Tournament Code: #${tournament.tournamentCode}` : '';
 
   const inviteMessage = `Awedadari Tournament Invitation 🏆
 
-${tournament.tournamentName} (${tournament.game})
+${tournament.tournamentName} (${tournament.game})${codeLine}
 📍 Venue: ${tournament.venueName || 'Nexus Gaming Lounge'} (${tournament.venueLocation || 'Bole Medhanialem'})
 📅 Date & Time: ${tournament.date} @ ${tournament.time}
 💰 Entry Fee: ${tournament.registrationFee || '50 ETB'}${awardLine}
@@ -75,9 +76,16 @@ ${miniAppInviteUrl}`;
             className="w-14 h-14 rounded-xl object-cover shrink-0 border border-slate-700"
           />
           <div className="min-w-0 flex-1">
-            <span className="text-[9px] font-mono text-amber-400 font-bold uppercase tracking-wider block">
-              {tournament.game}
-            </span>
+            <div className="flex items-center justify-between gap-1">
+              <span className="text-[9px] font-mono text-amber-400 font-bold uppercase tracking-wider block">
+                {tournament.game}
+              </span>
+              {tournament.tournamentCode && (
+                <span className="font-mono text-[9px] font-black text-amber-300 bg-amber-500/10 px-1.5 py-0.2 rounded border border-amber-500/20">
+                  #{tournament.tournamentCode}
+                </span>
+              )}
+            </div>
             <h4 className="font-extrabold text-xs text-white truncate">{tournament.tournamentName}</h4>
             <p className="text-[10px] text-slate-400 truncate">
               📍 {tournament.venueName} • Fee: {tournament.registrationFee}

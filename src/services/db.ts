@@ -8,6 +8,9 @@ import {
   User as FirebaseUser,
 } from 'firebase/auth';
 import {
+  initializeFirestore,
+  persistentLocalCache,
+  persistentMultipleTabManager,
   getFirestore,
   collection,
   doc,
@@ -16,7 +19,15 @@ import {
   deleteDoc,
   onSnapshot,
   getDocs,
+  getDoc,
+  runTransaction,
   writeBatch,
+  query,
+  where,
+  limit,
+  orderBy,
+  documentId,
+  Unsubscribe,
 } from 'firebase/firestore';
 import firebaseConfig from '../../firebase-applet-config.json';
 import {
@@ -41,6 +52,9 @@ import {
   FinalStanding,
   WithdrawalRequest,
   WithdrawalStatus,
+  PlayerGameStats,
+  RankedPlayerGameProfile,
+  GameCategoryInfo,
 } from '../types';
 import {
   INITIAL_USERS,
@@ -49,12 +63,29 @@ import {
   INITIAL_MATCHES,
 } from '../data/initialData';
 
-// Initialize Firebase App & Firestore
+// Initialize Firebase App & Firestore with persistent local cache
 const app = getApps().length === 0 ? initializeApp(firebaseConfig) : getApps()[0];
-const rawDbId = (firebaseConfig as Record<string, string>).firestoreDatabaseId;
+const rawDbId = (firebaseConfig as Record<string, string>).firestoreDatabaseId || 'ai-studio-awedadari-ddabb8ef-399f-49bf-88e8-cb12c59537e1';
 const dbId = rawDbId && rawDbId !== '(default)' ? rawDbId : undefined;
 
-export const firestore = getFirestore(app, dbId);
+function initFirestoreWithPersistentCache() {
+  try {
+    return initializeFirestore(
+      app,
+      {
+        localCache: persistentLocalCache({
+          tabManager: persistentMultipleTabManager(),
+        }),
+      },
+      dbId
+    );
+  } catch (err) {
+    console.warn('Persistent local cache initialization fallback to getFirestore:', err);
+    return getFirestore(app, dbId);
+  }
+}
+
+export const firestore = initFirestoreWithPersistentCache();
 export const auth = getAuth(app);
 
 export enum OperationType {
@@ -107,7 +138,7 @@ export function handleFirestoreError(error: unknown, operationType: OperationTyp
 const STORAGE_KEY_ACTIVE_USER = 'tc_active_user_id_v2';
 const DEFAULT_APPROVED_ORGANIZER_IDS = ['88492019', '777000', '123456789', '99887766'];
 
-class DatabaseService {
+export class DatabaseService {
   private users: User[] = this.loadUsersFromCache();
   private tournaments: Tournament[] = [];
   private tournamentPlayers: TournamentPlayer[] = [];
@@ -123,6 +154,19 @@ class DatabaseService {
   private listeners: Set<() => void> = new Set();
   private unsubscribes: (() => void)[] = [];
 
+  // Scoped Subscriptions State
+  private activeTournamentSubId: string | null = null;
+  private tournamentUnsubscribers: (() => void)[] = [];
+  private userRegUnsubscribe: (() => void) | null = null;
+  private activeUserDocUnsubscribe: (() => void) | null = null;
+  private organizerWithdrawalsUnsub: (() => void) | null = null;
+  private adminListeners: (() => void)[] = [];
+  private completedTournamentsLoaded: boolean = false;
+  private fetchedUserIds: Set<string> = new Set();
+  private inFlightUserIds: Set<string> = new Set();
+  private pendingUserFetchIds: Set<string> = new Set();
+  private userFetchTimeout: any = null;
+
   constructor() {
     try {
       localStorage.removeItem('tc_admin_creds_v2');
@@ -130,6 +174,11 @@ class DatabaseService {
     } catch {}
 
     onAuthStateChanged(auth, () => {
+      if (this.isFirebaseAdminAuthenticated()) {
+        this.syncAdminListeners();
+      } else {
+        this.cleanupAdminListeners();
+      }
       this.notify();
     });
 
@@ -152,29 +201,95 @@ class DatabaseService {
     });
   }
 
+  private mapTournamentDoc(docSnap: any): Tournament {
+    const data = docSnap.data();
+    return {
+      id: docSnap.id,
+      tournamentCode: data.tournamentCode || '',
+      tournamentName: data.name || data.tournamentName || '1v1 Tournament',
+      game: data.game || 'eFootball 2026',
+      image:
+        data.image ||
+        'https://images.unsplash.com/photo-1511512578047-dfb367046420?w=800&auto=format&fit=crop&q=80',
+      date: data.date || '2026-08-01',
+      time: data.time || '18:00',
+      maxPlayers: typeof data.maxPlayers === 'number' ? data.maxPlayers : 16,
+      status: (data.status as TournamentStatus) || 'Upcoming',
+      organizerId: data.organizerId || '',
+      venueName: data.venueName || 'Main Arena',
+      venueLocation: data.venueLocation || data.location || 'Bole Medhanialem, Building 3, 2nd Floor',
+      rules: data.rules || 'Standard competitive rules.',
+      registrationDeadline: data.registrationDeadline,
+      format: (data.format as TournamentFormat) || 'elimination',
+      groupSize: typeof data.groupSize === 'number' ? data.groupSize : 4,
+      currentStage: data.currentStage || 'registration',
+      currentRound: typeof data.currentRound === 'number' ? data.currentRound : 1,
+      maxRounds: typeof data.maxRounds === 'number' ? data.maxRounds : 3,
+      isApproved: data.isApproved !== undefined ? Boolean(data.isApproved) : true,
+      registrationFee: data.registrationFee || '50 ETB',
+      prizePool: data.prizePool || '',
+      award: data.award || data.prizePool || '',
+      telebirrNumber: data.telebirrNumber || '',
+      telebirrAccountName: data.telebirrAccountName || data.telebirrName || '',
+      telebirrName: data.telebirrName || data.telebirrAccountName || '',
+      performanceLabel: data.performanceLabel || 'Performance',
+      sessionLabel: data.sessionLabel || 'Match',
+      finalStandings: data.finalStandings || [],
+    };
+  }
+
+  private mapUserDoc(docSnap: any): User {
+    const data = docSnap.data();
+    let cached: Partial<User> = {};
+    try {
+      const saved = localStorage.getItem(`SG_USER_CACHE_${docSnap.id}`);
+      if (saved) cached = JSON.parse(saved);
+    } catch {}
+
+    return {
+      id: docSnap.id,
+      name: data.name ?? cached.name ?? 'Competitor',
+      username: data.username ?? cached.username ?? 'user',
+      profileImage:
+        data.profilePhoto ??
+        data.profileImage ??
+        cached.profileImage ??
+        'https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?w=150',
+      telegramUserId: data.telegramId ?? data.telegramUserId ?? cached.telegramUserId ?? `tg_${docSnap.id}`,
+      role: (data.role as UserRole) ?? (cached.role as UserRole) ?? 'PLAYER',
+      gamertag: data.gamertag ?? cached.gamertag ?? data.name ?? cached.name,
+      favGame: data.favGame ?? cached.favGame ?? 'eFootball 2026',
+      venueName: data.venueName ?? cached.venueName,
+      phoneNumber: data.phoneNumber ?? data.phone ?? cached.phoneNumber ?? '',
+      bio: data.bio ?? cached.bio ?? '',
+      organizerRequestStatus: data.organizerRequestStatus || 'none',
+      organizerRequestReason: data.organizerRequestReason || '',
+      rating: data.rating || 5.0,
+      ratingCount: data.ratingCount || 0,
+    };
+  }
+
+  private mergeUsers(newUsers: User[]) {
+    const userMap = new Map<string, User>();
+    this.users.forEach((u) => userMap.set(u.id, u));
+    newUsers.forEach((u) => userMap.set(u.id, u));
+    this.users = Array.from(userMap.values());
+  }
+
+  private mergeTournaments(newTournaments: Tournament[]) {
+    const tourMap = new Map<string, Tournament>();
+    this.tournaments.forEach((t) => tourMap.set(t.id, t));
+    newTournaments.forEach((t) => tourMap.set(t.id, t));
+    this.tournaments = Array.from(tourMap.values());
+  }
+
   private initRealtimeListeners() {
     let usersLoaded = false;
     let tournamentsLoaded = false;
-    let playersLoaded = false;
-    let matchesLoaded = false;
     let organizersLoaded = false;
-    let groupsLoaded = false;
-    let sessionsLoaded = false;
-    let scoresLoaded = false;
-    let orgReqsLoaded = false;
 
     const checkLoadingFinished = () => {
-      if (
-        usersLoaded &&
-        tournamentsLoaded &&
-        playersLoaded &&
-        matchesLoaded &&
-        organizersLoaded &&
-        groupsLoaded &&
-        sessionsLoaded &&
-        scoresLoaded &&
-        orgReqsLoaded
-      ) {
+      if (usersLoaded && tournamentsLoaded && organizersLoaded) {
         const wasLoading = this.loading;
         this.loading = false;
         if (wasLoading) {
@@ -183,201 +298,7 @@ class DatabaseService {
       }
     };
 
-    // 0. Listen to ORGANIZER_REQUESTS collection
-    onSnapshot(
-      collection(firestore, 'organizerRequests'),
-      (snapshot) => {
-        this.organizerRequests = snapshot.docs.map((docSnap) => {
-          const data = docSnap.data();
-          return {
-            id: docSnap.id,
-            userId: data.userId,
-            userName: data.userName || 'User',
-            username: data.username || '',
-            telegramUserId: data.telegramUserId || '',
-            reason: data.reason || '',
-            status: data.status || 'pending',
-            requestedAt: data.requestedAt || new Date().toISOString(),
-          };
-        });
-        orgReqsLoaded = true;
-        checkLoadingFinished();
-        this.notify();
-      },
-      (err) => {
-        console.error('Error listening to organizerRequests:', err);
-        orgReqsLoaded = true;
-        checkLoadingFinished();
-      }
-    );
-
-    // 1. Listen to USERS collection
-    const unsubUsers = onSnapshot(
-      collection(firestore, 'users'),
-      async (snapshot) => {
-        if (snapshot.empty && !usersLoaded) {
-          // Auto-seed if empty on initial launch (only if admin authenticated)
-          if (this.isFirebaseAdminAuthenticated()) {
-            await this.seedDemoData().catch((err) => console.error('Error seeding demo data:', err));
-          } else {
-            this.users = [...INITIAL_USERS];
-            usersLoaded = true;
-            checkLoadingFinished();
-            this.notify();
-          }
-          return;
-        }
-        this.users = snapshot.docs.map((docSnap) => {
-          const data = docSnap.data();
-          let cached: Partial<User> = {};
-          try {
-            const saved = localStorage.getItem(`SG_USER_CACHE_${docSnap.id}`);
-            if (saved) cached = JSON.parse(saved);
-          } catch {}
-
-          return {
-            id: docSnap.id,
-            name: cached.name || data.name || 'Competitor',
-            username: cached.username || data.username || 'user',
-            profileImage:
-              cached.profileImage ||
-              data.profilePhoto ||
-              data.profileImage ||
-              'https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?w=150',
-            telegramUserId: cached.telegramUserId || data.telegramId || data.telegramUserId || `tg_${docSnap.id}`,
-            role: (cached.role || data.role as UserRole) || 'PLAYER',
-            gamertag: cached.gamertag || data.gamertag || data.name,
-            favGame: cached.favGame || data.favGame || 'eFootball 2026',
-            venueName: cached.venueName || data.venueName,
-            phoneNumber: cached.phoneNumber || data.phoneNumber || data.phone || '',
-            bio: cached.bio || data.bio || '',
-            organizerRequestStatus: data.organizerRequestStatus || 'none',
-            organizerRequestReason: data.organizerRequestReason || '',
-            rating: data.rating || 5.0,
-            ratingCount: data.ratingCount || 0,
-          };
-        });
-        usersLoaded = true;
-        checkLoadingFinished();
-        this.notify();
-      },
-      (err) => {
-        console.error('Error listening to users collection:', err);
-        usersLoaded = true;
-        checkLoadingFinished();
-      }
-    );
-
-    // 2. Listen to TOURNAMENTS collection
-    const unsubTournaments = onSnapshot(
-      collection(firestore, 'tournaments'),
-      (snapshot) => {
-        this.tournaments = snapshot.docs.map((docSnap) => {
-          const data = docSnap.data();
-          return {
-            id: docSnap.id,
-            tournamentName: data.name || data.tournamentName || '1v1 Tournament',
-            game: data.game || 'eFootball 2026',
-            image:
-              data.image ||
-              'https://images.unsplash.com/photo-1511512578047-dfb367046420?w=800&auto=format&fit=crop&q=80',
-            date: data.date || '2026-08-01',
-            time: data.time || '18:00',
-            maxPlayers: typeof data.maxPlayers === 'number' ? data.maxPlayers : 16,
-            status: (data.status as TournamentStatus) || 'Upcoming',
-            organizerId: data.organizerId || '',
-            venueName: data.venueName || 'Main Arena',
-            venueLocation: data.venueLocation || data.location || 'Bole Medhanialem, Building 3, 2nd Floor',
-            rules: data.rules || 'Standard competitive rules.',
-            registrationDeadline: data.registrationDeadline,
-            format: (data.format as TournamentFormat) || 'elimination',
-            groupSize: typeof data.groupSize === 'number' ? data.groupSize : 4,
-            currentStage: data.currentStage || 'registration',
-            currentRound: typeof data.currentRound === 'number' ? data.currentRound : 1,
-            maxRounds: typeof data.maxRounds === 'number' ? data.maxRounds : 3,
-            isApproved: data.isApproved !== undefined ? Boolean(data.isApproved) : true,
-            registrationFee: data.registrationFee || '50 ETB',
-            prizePool: data.prizePool || '',
-            award: data.award || data.prizePool || '',
-            telebirrNumber: data.telebirrNumber || '',
-            telebirrAccountName: data.telebirrAccountName || data.telebirrName || '',
-            telebirrName: data.telebirrName || data.telebirrAccountName || '',
-            performanceLabel: data.performanceLabel || 'Performance',
-            sessionLabel: data.sessionLabel || 'Match',
-            finalStandings: data.finalStandings || [],
-          };
-        });
-        tournamentsLoaded = true;
-        checkLoadingFinished();
-        this.notify();
-      },
-      (err) => {
-        console.error('Error listening to tournaments collection:', err);
-        tournamentsLoaded = true;
-        checkLoadingFinished();
-      }
-    );
-
-    // 3. Listen to TOURNAMENT_PLAYERS collection
-    const unsubPlayers = onSnapshot(
-      collection(firestore, 'tournamentPlayers'),
-      (snapshot) => {
-        this.tournamentPlayers = snapshot.docs.map((docSnap) => {
-          const data = docSnap.data();
-          return {
-            tournamentId: data.tournamentId,
-            userId: data.userId,
-            registrationDate: data.joinedAt || data.registrationDate || new Date().toISOString(),
-            playerStatus: (data.status || data.playerStatus || 'Registered') as PlayerStatus,
-            paymentStatus: (data.paymentStatus || (data.paymentProofUrl ? 'PENDING_APPROVAL' : 'CONFIRMED')) as PaymentStatus,
-            paymentProofUrl: data.paymentProofUrl || '',
-            paymentSubmittedAt: data.paymentSubmittedAt || data.joinedAt || '',
-            seed: data.seed,
-            checkInCode: data.checkInCode || `SG-${data.userId ? data.userId.slice(-4).toUpperCase() : '1001'}`,
-          };
-        });
-        playersLoaded = true;
-        checkLoadingFinished();
-        this.notify();
-      },
-      (err) => {
-        console.error('Error listening to tournamentPlayers collection:', err);
-        playersLoaded = true;
-        checkLoadingFinished();
-      }
-    );
-
-    // 4. Listen to MATCHES collection
-    const unsubMatches = onSnapshot(
-      collection(firestore, 'matches'),
-      (snapshot) => {
-        this.matches = snapshot.docs.map((docSnap) => {
-          const data = docSnap.data();
-          return {
-            id: docSnap.id,
-            tournamentId: data.tournamentId,
-            round: data.round || 'Round 1',
-            playerAId: data.playerA ?? data.playerAId ?? null,
-            playerBId: data.playerB ?? data.playerBId ?? null,
-            stationNumber: data.station || data.stationNumber || 'Station 01',
-            winnerId: data.winner ?? data.winnerId ?? null,
-            score: data.score || '0 - 0',
-            status: (data.status as MatchStatus) || 'Waiting',
-            groupId: data.groupId || '',
-          };
-        });
-        matchesLoaded = true;
-        checkLoadingFinished();
-        this.notify();
-      },
-      (err) => {
-        console.error('Error listening to matches collection:', err);
-        matchesLoaded = true;
-        checkLoadingFinished();
-      }
-    );
-
-    // 5. Listen to APPROVED ORGANIZERS collection
+    // 1. Listen to APPROVED ORGANIZERS collection (Authoritative & Lean)
     const unsubOrganizers = onSnapshot(
       collection(firestore, 'approvedOrganizers'),
       (snapshot) => {
@@ -397,11 +318,172 @@ class DatabaseService {
       }
     );
 
-    // 6. Listen to TOURNAMENT_GROUPS collection
-    const unsubGroups = onSnapshot(
-      collection(firestore, 'tournamentGroups'),
+    // 2. Listen to Active/Upcoming TOURNAMENTS collection
+    // Filters out historic completed tournaments from the hot real-time stream
+    const activeTournamentsQuery = query(
+      collection(firestore, 'tournaments'),
+      where('status', 'in', ['Draft', 'Registration Open', 'Live', 'Upcoming', 'Ongoing'])
+    );
+
+    const unsubTournaments = onSnapshot(
+      activeTournamentsQuery,
       (snapshot) => {
-        this.tournamentGroups = snapshot.docs.map((docSnap) => {
+        const activeTours = snapshot.docs.map((docSnap) => this.mapTournamentDoc(docSnap));
+        this.mergeTournaments(activeTours);
+        tournamentsLoaded = true;
+        checkLoadingFinished();
+        this.notify();
+      },
+      (err) => {
+        console.error('Error listening to active tournaments:', err);
+        // Fallback: load all tournaments if the composite filter index is missing
+        onSnapshot(
+          collection(firestore, 'tournaments'),
+          (snap) => {
+            const allTours = snap.docs.map((d) => this.mapTournamentDoc(d));
+            this.mergeTournaments(allTours);
+            tournamentsLoaded = true;
+            checkLoadingFinished();
+            this.notify();
+          },
+          () => {
+            tournamentsLoaded = true;
+            checkLoadingFinished();
+          }
+        );
+      }
+    );
+
+    // 3. Listen to Top USERS (Limited to 50 for leaderboard / profile cards)
+    const usersQuery = query(collection(firestore, 'users'), limit(50));
+    const unsubUsers = onSnapshot(
+      usersQuery,
+      async (snapshot) => {
+        if (snapshot.empty && !usersLoaded) {
+          if (this.isFirebaseAdminAuthenticated()) {
+            await this.seedDemoData().catch((err) => console.error('Error seeding demo data:', err));
+          } else {
+            usersLoaded = true;
+            checkLoadingFinished();
+            this.notify();
+          }
+          return;
+        }
+        const userDocs = snapshot.docs.map((docSnap) => this.mapUserDoc(docSnap));
+        this.mergeUsers(userDocs);
+        usersLoaded = true;
+        checkLoadingFinished();
+        this.notify();
+      },
+      (err) => {
+        console.error('Error listening to users:', err);
+        usersLoaded = true;
+        checkLoadingFinished();
+      }
+    );
+
+    this.unsubscribes.push(unsubOrganizers, unsubTournaments, unsubUsers);
+
+    // Safety timeout to ensure loading spinner never hangs indefinitely
+    setTimeout(() => {
+      if (this.loading) {
+        this.loading = false;
+        this.notify();
+      }
+    }, 2500);
+  }
+
+  // =========================================================================
+  // SCOPED TOURNAMENT SUBSCRIBER (Matches, Players, Groups, Sessions, Scores)
+  // Only listens to details of the tournament currently viewed by the user/organizer
+  // =========================================================================
+  public subscribeToTournament(tournamentId: string) {
+    if (!tournamentId) return;
+    if (this.activeTournamentSubId === tournamentId) return;
+
+    // Unsubscribe from previous tournament
+    this.unsubscribeFromTournament();
+    this.activeTournamentSubId = tournamentId;
+
+    // 1. Scoped TOURNAMENT PLAYERS
+    const playersQuery = query(
+      collection(firestore, 'tournamentPlayers'),
+      where('tournamentId', '==', tournamentId)
+    );
+    const unsubPlayers = onSnapshot(
+      playersQuery,
+      (snapshot) => {
+        const newPlayers: TournamentPlayer[] = snapshot.docs.map((docSnap) => {
+          const data = docSnap.data();
+          return {
+            tournamentId: data.tournamentId,
+            userId: data.userId,
+            registrationDate: data.joinedAt || data.registrationDate || new Date().toISOString(),
+            playerStatus: (data.status || data.playerStatus || 'Registered') as PlayerStatus,
+            paymentStatus: (data.paymentStatus || (data.paymentProofUrl ? 'PENDING_APPROVAL' : 'CONFIRMED')) as PaymentStatus,
+            paymentProofUrl: data.paymentProofUrl || '',
+            paymentSubmittedAt: data.paymentSubmittedAt || data.joinedAt || '',
+            seed: data.seed,
+            checkInCode: data.checkInCode || `SG-${data.userId ? data.userId.slice(-4).toUpperCase() : '1001'}`,
+          };
+        });
+
+        // Merge into tournamentPlayers state
+        const otherPlayers = this.tournamentPlayers.filter((p) => p.tournamentId !== tournamentId);
+        this.tournamentPlayers = [...otherPlayers, ...newPlayers];
+
+        // Ensure user details for all registered players are available via batch lookup
+        const missingUserIds = newPlayers
+          .map((p) => p.userId)
+          .filter((uid): uid is string => Boolean(uid && !this.users.some((u) => u.id === uid) && !uid.startsWith('demo_')));
+        if (missingUserIds.length > 0) {
+          this.fetchUsersByIds(missingUserIds);
+        }
+
+        this.notify();
+      },
+      (err) => console.error(`Error listening to tournamentPlayers for ${tournamentId}:`, err)
+    );
+
+    // 2. Scoped MATCHES
+    const matchesQuery = query(
+      collection(firestore, 'matches'),
+      where('tournamentId', '==', tournamentId)
+    );
+    const unsubMatches = onSnapshot(
+      matchesQuery,
+      (snapshot) => {
+        const newMatches: Match[] = snapshot.docs.map((docSnap) => {
+          const data = docSnap.data();
+          return {
+            id: docSnap.id,
+            tournamentId: data.tournamentId,
+            round: data.round || 'Round 1',
+            playerAId: data.playerA ?? data.playerAId ?? null,
+            playerBId: data.playerB ?? data.playerBId ?? null,
+            stationNumber: data.station || data.stationNumber || 'Station 01',
+            winnerId: data.winner ?? data.winnerId ?? null,
+            score: data.score || '0 - 0',
+            status: (data.status as MatchStatus) || 'Waiting',
+            groupId: data.groupId || '',
+          };
+        });
+        const otherMatches = this.matches.filter((m) => m.tournamentId !== tournamentId);
+        this.matches = [...otherMatches, ...newMatches];
+        this.notify();
+      },
+      (err) => console.error(`Error listening to matches for ${tournamentId}:`, err)
+    );
+
+    // 3. Scoped TOURNAMENT GROUPS
+    const groupsQuery = query(
+      collection(firestore, 'tournamentGroups'),
+      where('tournamentId', '==', tournamentId)
+    );
+    const unsubGroups = onSnapshot(
+      groupsQuery,
+      (snapshot) => {
+        const newGroups: TournamentGroup[] = snapshot.docs.map((docSnap) => {
           const data = docSnap.data();
           return {
             id: docSnap.id,
@@ -413,22 +495,22 @@ class DatabaseService {
             playerStatuses: data.playerStatuses || {},
           };
         });
-        groupsLoaded = true;
-        checkLoadingFinished();
+        const otherGroups = this.tournamentGroups.filter((g) => g.tournamentId !== tournamentId);
+        this.tournamentGroups = [...otherGroups, ...newGroups];
         this.notify();
       },
-      (err) => {
-        console.error('Error listening to tournamentGroups collection:', err);
-        groupsLoaded = true;
-        checkLoadingFinished();
-      }
+      (err) => console.error(`Error listening to tournamentGroups for ${tournamentId}:`, err)
     );
 
-    // 7. Listen to TOURNAMENT_SESSIONS collection
-    const unsubSessions = onSnapshot(
+    // 4. Scoped TOURNAMENT SESSIONS
+    const sessionsQuery = query(
       collection(firestore, 'tournamentSessions'),
+      where('tournamentId', '==', tournamentId)
+    );
+    const unsubSessions = onSnapshot(
+      sessionsQuery,
       (snapshot) => {
-        this.tournamentSessions = snapshot.docs.map((docSnap) => {
+        const newSessions: TournamentSession[] = snapshot.docs.map((docSnap) => {
           const data = docSnap.data();
           return {
             id: docSnap.id,
@@ -438,22 +520,22 @@ class DatabaseService {
             scores: data.scores || [],
           };
         });
-        sessionsLoaded = true;
-        checkLoadingFinished();
+        const otherSessions = this.tournamentSessions.filter((s) => s.tournamentId !== tournamentId);
+        this.tournamentSessions = [...otherSessions, ...newSessions];
         this.notify();
       },
-      (err) => {
-        console.error('Error listening to tournamentSessions collection:', err);
-        sessionsLoaded = true;
-        checkLoadingFinished();
-      }
+      (err) => console.error(`Error listening to tournamentSessions for ${tournamentId}:`, err)
     );
 
-    // 8. Listen to ROUND_SCORES collection
-    const unsubScores = onSnapshot(
+    // 5. Scoped ROUND SCORES
+    const scoresQuery = query(
       collection(firestore, 'roundScores'),
+      where('tournamentId', '==', tournamentId)
+    );
+    const unsubScores = onSnapshot(
+      scoresQuery,
       (snapshot) => {
-        this.roundScores = snapshot.docs.map((docSnap) => {
+        const newScores: PlayerRoundScore[] = snapshot.docs.map((docSnap) => {
           const data = docSnap.data();
           return {
             id: docSnap.id,
@@ -464,18 +546,268 @@ class DatabaseService {
             groupId: data.groupId || '',
           };
         });
-        scoresLoaded = true;
-        checkLoadingFinished();
+        const otherScores = this.roundScores.filter((s) => s.tournamentId !== tournamentId);
+        this.roundScores = [...otherScores, ...newScores];
         this.notify();
       },
-      (err) => {
-        console.error('Error listening to roundScores collection:', err);
-        scoresLoaded = true;
-        checkLoadingFinished();
-      }
+      (err) => console.error(`Error listening to roundScores for ${tournamentId}:`, err)
     );
 
-    // 9. Listen to WITHDRAWAL_REQUESTS collection
+    this.tournamentUnsubscribers.push(
+      unsubPlayers,
+      unsubMatches,
+      unsubGroups,
+      unsubSessions,
+      unsubScores
+    );
+  }
+
+  public unsubscribeFromTournament() {
+    if (this.tournamentUnsubscribers.length > 0) {
+      this.tournamentUnsubscribers.forEach((unsub) => {
+        try {
+          unsub();
+        } catch {}
+      });
+      this.tournamentUnsubscribers = [];
+    }
+    this.activeTournamentSubId = null;
+  }
+
+  // =========================================================================
+  // ON-DEMAND COMPLETED TOURNAMENTS LOADER
+  // =========================================================================
+  public async loadCompletedTournaments(): Promise<void> {
+    if (this.completedTournamentsLoaded) return;
+    try {
+      const q = query(
+        collection(firestore, 'tournaments'),
+        where('status', 'in', ['Completed', 'Finished'])
+      );
+      const snapshot = await getDocs(q);
+      const completed = snapshot.docs.map((d) => this.mapTournamentDoc(d));
+      this.mergeTournaments(completed);
+      this.completedTournamentsLoaded = true;
+      this.notify();
+    } catch (err) {
+      console.warn('Error loading completed tournaments:', err);
+    }
+  }
+
+  // =========================================================================
+  // ON-DEMAND BATCHED USER FETCHER & CACHE
+  // =========================================================================
+  public async fetchUsersByIds(userIds: string[]): Promise<User[]> {
+    if (!userIds || userIds.length === 0) return [];
+
+    const uniqueIds = Array.from(
+      new Set(userIds.filter((id) => id && typeof id === 'string' && !id.startsWith('demo_')))
+    );
+
+    const neededIds = uniqueIds.filter(
+      (id) =>
+        !this.users.some((u) => u.id === id) &&
+        !this.fetchedUserIds.has(id) &&
+        !this.inFlightUserIds.has(id)
+    );
+
+    if (neededIds.length === 0) {
+      return this.users.filter((u) => uniqueIds.includes(u.id));
+    }
+
+    // Mark as in-flight immediately to prevent duplicate concurrent queries
+    neededIds.forEach((id) => this.inFlightUserIds.add(id));
+
+    // Firestore supports up to 30 elements in an 'in' query
+    const BATCH_SIZE = 30;
+    const fetchedUsers: User[] = [];
+
+    for (let i = 0; i < neededIds.length; i += BATCH_SIZE) {
+      const batchIds = neededIds.slice(i, i + BATCH_SIZE);
+      try {
+        const usersQuery = query(
+          collection(firestore, 'users'),
+          where(documentId(), 'in', batchIds)
+        );
+        const snapshot = await getDocs(usersQuery);
+        if (!snapshot.empty) {
+          const docsUsers = snapshot.docs.map((docSnap) => this.mapUserDoc(docSnap));
+          fetchedUsers.push(...docsUsers);
+        }
+        // Mark these IDs as fetched (even if some docs did not exist in Firestore)
+        batchIds.forEach((id) => {
+          this.fetchedUserIds.add(id);
+          this.inFlightUserIds.delete(id);
+        });
+      } catch (err) {
+        console.warn(`Error fetching user batch of ${batchIds.length} users:`, err);
+        // Release from in-flight on failure
+        batchIds.forEach((id) => this.inFlightUserIds.delete(id));
+      }
+    }
+
+    if (fetchedUsers.length > 0) {
+      this.mergeUsers(fetchedUsers);
+      this.notify();
+    }
+
+    return this.users.filter((u) => uniqueIds.includes(u.id));
+  }
+
+  public async fetchUserById(userId: string): Promise<User | null> {
+    if (!userId || typeof userId !== 'string' || userId.startsWith('demo_')) return null;
+    const existing = this.users.find((u) => u.id === userId);
+    if (existing) return existing;
+
+    const results = await this.fetchUsersByIds([userId]);
+    return results.find((u) => u.id === userId) || this.users.find((u) => u.id === userId) || null;
+  }
+
+  public queueUserFetch(userId: string): void {
+    if (!userId || typeof userId !== 'string' || userId.startsWith('demo_')) return;
+    if (this.users.some((u) => u.id === userId)) return;
+    if (this.fetchedUserIds.has(userId) || this.inFlightUserIds.has(userId)) return;
+
+    this.pendingUserFetchIds.add(userId);
+    if (!this.userFetchTimeout) {
+      this.userFetchTimeout = setTimeout(() => {
+        const idsToFetch = Array.from(this.pendingUserFetchIds);
+        this.pendingUserFetchIds.clear();
+        this.userFetchTimeout = null;
+        if (idsToFetch.length > 0) {
+          this.fetchUsersByIds(idsToFetch);
+        }
+      }, 15);
+    }
+  }
+
+  // =========================================================================
+  // ROLE-GATED USER & ORGANIZER LISTENERS
+  // =========================================================================
+  public syncRoleListeners(user: User) {
+    if (!user || !user.id) return;
+
+    // 1. Listen to active user's own document
+    if (!this.activeUserDocUnsubscribe) {
+      this.activeUserDocUnsubscribe = onSnapshot(
+        doc(firestore, 'users', user.id),
+        (snap) => {
+          if (snap.exists()) {
+            const updatedUser = this.mapUserDoc(snap);
+            this.mergeUsers([updatedUser]);
+            this.notify();
+          }
+        },
+        (err) => console.warn('Error listening to active user doc:', err)
+      );
+    }
+
+    // 2. Listen to active user's own tournament registrations
+    if (!this.userRegUnsubscribe) {
+      const userRegsQuery = query(
+        collection(firestore, 'tournamentPlayers'),
+        where('userId', '==', user.id)
+      );
+      this.userRegUnsubscribe = onSnapshot(
+        userRegsQuery,
+        (snapshot) => {
+          const myRegs: TournamentPlayer[] = snapshot.docs.map((docSnap) => {
+            const data = docSnap.data();
+            return {
+              tournamentId: data.tournamentId,
+              userId: data.userId,
+              registrationDate: data.joinedAt || data.registrationDate || new Date().toISOString(),
+              playerStatus: (data.status || data.playerStatus || 'Registered') as PlayerStatus,
+              paymentStatus: (data.paymentStatus || (data.paymentProofUrl ? 'PENDING_APPROVAL' : 'CONFIRMED')) as PaymentStatus,
+              paymentProofUrl: data.paymentProofUrl || '',
+              paymentSubmittedAt: data.paymentSubmittedAt || data.joinedAt || '',
+              seed: data.seed,
+              checkInCode: data.checkInCode || `SG-${data.userId ? data.userId.slice(-4).toUpperCase() : '1001'}`,
+            };
+          });
+
+          // Merge my registrations with any tournament-scoped registrations
+          const other = this.tournamentPlayers.filter((p) => p.userId !== user.id);
+          this.tournamentPlayers = [...other, ...myRegs];
+          this.notify();
+        },
+        (err) => console.warn('Error listening to user registrations:', err)
+      );
+    }
+
+    // 3. Organizer-specific listener for their own withdrawal requests
+    if (user.role === 'ORGANIZER' && !this.organizerWithdrawalsUnsub) {
+      const orgWithdrawalsQuery = query(
+        collection(firestore, 'withdrawalRequests'),
+        where('organizerId', '==', user.id)
+      );
+      this.organizerWithdrawalsUnsub = onSnapshot(
+        orgWithdrawalsQuery,
+        (snapshot) => {
+          const myWithdrawals: WithdrawalRequest[] = snapshot.docs.map((docSnap) => {
+            const data = docSnap.data();
+            let tName = data.telebirrName || '';
+            let tNum = data.telebirrNumber || '';
+            if (!tName && data.reason && data.reason.includes('Telebirr:')) {
+              const match = data.reason.match(/Telebirr:\s*([^(]+)/);
+              if (match && match[1]) tName = match[1].trim();
+            }
+            if (!tNum && data.reason && data.reason.includes('(')) {
+              const match = data.reason.match(/\(([^)]+)\)/);
+              if (match && match[1]) tNum = match[1].trim();
+            }
+            return {
+              id: docSnap.id,
+              organizerId: data.organizerId || '',
+              organizerName: data.organizerName || 'Organizer',
+              amount: Number(data.amount || 0),
+              telebirrName: tName,
+              telebirrNumber: tNum,
+              reason: data.reason || '',
+              status: (data.status as WithdrawalStatus) || 'Pending Approval',
+              requestedAt: data.requestedAt || new Date().toISOString(),
+              processedAt: data.processedAt,
+            };
+          });
+          const otherWithdrawals = this.withdrawalRequests.filter((w) => w.organizerId !== user.id);
+          this.withdrawalRequests = [...otherWithdrawals, ...myWithdrawals];
+          this.notify();
+        },
+        (err) => console.warn('Error listening to organizer withdrawal requests:', err)
+      );
+    }
+  }
+
+  // =========================================================================
+  // ADMIN-GATED LISTENERS (Organizer Requests, Withdrawals, Pending Payments)
+  // Only active when an authenticated admin is active in the session
+  // =========================================================================
+  public syncAdminListeners() {
+    if (this.adminListeners.length > 0) return;
+
+    // 1. Admin ORGANIZER REQUESTS
+    const unsubOrgReqs = onSnapshot(
+      collection(firestore, 'organizerRequests'),
+      (snapshot) => {
+        this.organizerRequests = snapshot.docs.map((docSnap) => {
+          const data = docSnap.data();
+          return {
+            id: docSnap.id,
+            userId: data.userId,
+            userName: data.userName || 'User',
+            username: data.username || '',
+            telegramUserId: data.telegramUserId || '',
+            reason: data.reason || '',
+            status: data.status || 'pending',
+            requestedAt: data.requestedAt || new Date().toISOString(),
+          };
+        });
+        this.notify();
+      },
+      (err) => console.warn('Admin organizerRequests listener error:', err)
+    );
+
+    // 2. Admin WITHDRAWAL REQUESTS (All organizers)
     const unsubWithdrawals = onSnapshot(
       collection(firestore, 'withdrawalRequests'),
       (snapshot) => {
@@ -483,7 +815,6 @@ class DatabaseService {
           const data = docSnap.data();
           let tName = data.telebirrName || '';
           let tNum = data.telebirrNumber || '';
-
           if (!tName && data.reason && data.reason.includes('Telebirr:')) {
             const match = data.reason.match(/Telebirr:\s*([^(]+)/);
             if (match && match[1]) tName = match[1].trim();
@@ -492,7 +823,6 @@ class DatabaseService {
             const match = data.reason.match(/\(([^)]+)\)/);
             if (match && match[1]) tNum = match[1].trim();
           }
-
           return {
             id: docSnap.id,
             organizerId: data.organizerId || '',
@@ -508,22 +838,52 @@ class DatabaseService {
         });
         this.notify();
       },
-      (err) => {
-        console.error('Error listening to withdrawalRequests collection:', err);
-      }
+      (err) => console.warn('Admin withdrawalRequests listener error:', err)
     );
 
-    this.unsubscribes.push(
-      unsubUsers,
-      unsubTournaments,
-      unsubPlayers,
-      unsubMatches,
-      unsubOrganizers,
-      unsubGroups,
-      unsubSessions,
-      unsubScores,
-      unsubWithdrawals
+    // 3. Admin PENDING PAYMENTS
+    const pendingPaymentsQuery = query(
+      collection(firestore, 'tournamentPlayers'),
+      where('paymentStatus', '==', 'PENDING_APPROVAL')
     );
+    const unsubPendingPayments = onSnapshot(
+      pendingPaymentsQuery,
+      (snapshot) => {
+        const pending: TournamentPlayer[] = snapshot.docs.map((docSnap) => {
+          const data = docSnap.data();
+          return {
+            tournamentId: data.tournamentId,
+            userId: data.userId,
+            registrationDate: data.joinedAt || data.registrationDate || new Date().toISOString(),
+            playerStatus: (data.status || data.playerStatus || 'Registered') as PlayerStatus,
+            paymentStatus: 'PENDING_APPROVAL',
+            paymentProofUrl: data.paymentProofUrl || '',
+            paymentSubmittedAt: data.paymentSubmittedAt || data.joinedAt || '',
+            seed: data.seed,
+            checkInCode: data.checkInCode || `SG-${data.userId ? data.userId.slice(-4).toUpperCase() : '1001'}`,
+          };
+        });
+
+        // Merge pending payments with current tournamentPlayers
+        const nonPending = this.tournamentPlayers.filter((p) => p.paymentStatus !== 'PENDING_APPROVAL');
+        this.tournamentPlayers = [...nonPending, ...pending];
+        this.notify();
+      },
+      (err) => console.warn('Admin pending payments listener error:', err)
+    );
+
+    this.adminListeners.push(unsubOrgReqs, unsubWithdrawals, unsubPendingPayments);
+  }
+
+  public cleanupAdminListeners() {
+    if (this.adminListeners.length > 0) {
+      this.adminListeners.forEach((unsub) => {
+        try {
+          unsub();
+        } catch {}
+      });
+      this.adminListeners = [];
+    }
   }
 
   public subscribe(listener: () => void) {
@@ -687,60 +1047,135 @@ class DatabaseService {
     return [...this.approvedOrganizerIds];
   }
 
-  public isApprovedOrganizer(telegramUserId: string | number): boolean {
-    const cleanId = String(telegramUserId).replace(/^tg_/, '');
-    return this.approvedOrganizerIds.some((id) => id.replace(/^tg_/, '') === cleanId);
+  public isApprovedOrganizer(identifier: string | number): boolean {
+    if (!identifier) return false;
+    // Normalize any identifier variation: 88492019, tg_88492019, user_tg_88492019, user_88492019
+    const cleanId = String(identifier)
+      .replace(/^user_tg_/, '')
+      .replace(/^user_/, '')
+      .replace(/^tg_/, '')
+      .trim();
+    if (!cleanId) return false;
+
+    // Check direct in-memory approved list (real-time mirror of approvedOrganizers collection)
+    const inApprovedList = this.approvedOrganizerIds.some((id) => {
+      const normalizedDocId = id
+        .replace(/^user_tg_/, '')
+        .replace(/^user_/, '')
+        .replace(/^tg_/, '')
+        .trim();
+      return normalizedDocId === cleanId;
+    });
+
+    if (inApprovedList) return true;
+
+    // Also check if the user object with this identifier has organizerRequestStatus === 'approved'
+    const matchedUser = this.users.find((u) => {
+      const uCleanTg = (u.telegramUserId || '').replace(/^user_tg_/, '').replace(/^user_/, '').replace(/^tg_/, '').trim();
+      const uCleanId = (u.id || '').replace(/^user_tg_/, '').replace(/^user_/, '').replace(/^tg_/, '').trim();
+      return uCleanTg === cleanId || uCleanId === cleanId;
+    });
+
+    if (matchedUser && matchedUser.organizerRequestStatus === 'approved') {
+      return true;
+    }
+
+    return false;
   }
 
   public async addApprovedOrganizerId(telegramUserId: string): Promise<boolean> {
-    const cleanId = telegramUserId.trim().replace(/^tg_/, '');
+    const cleanId = String(telegramUserId)
+      .replace(/^user_tg_/, '')
+      .replace(/^user_/, '')
+      .replace(/^tg_/, '')
+      .trim();
     if (!cleanId) return false;
 
-    // Save to Firestore
+    // Save authoritative record to Firestore
     await setDoc(doc(firestore, 'approvedOrganizers', cleanId), {
       approved: true,
       createdAt: new Date().toISOString(),
     });
 
-    // Check if user exists and upgrade role to ORGANIZER
-    const existingUser = this.users.find(
-      (u) => u.telegramUserId.replace(/^tg_/, '') === cleanId
-    );
-    if (existingUser) {
-      await updateDoc(doc(firestore, 'users', existingUser.id), { role: 'ORGANIZER' });
+    if (!this.approvedOrganizerIds.includes(cleanId)) {
+      this.approvedOrganizerIds.push(cleanId);
     }
+
+    // Check if user exists and upgrade role & status
+    const existingUser = this.users.find((u) => {
+      const uCleanTg = (u.telegramUserId || '').replace(/^user_tg_/, '').replace(/^user_/, '').replace(/^tg_/, '').trim();
+      const uCleanId = (u.id || '').replace(/^user_tg_/, '').replace(/^user_/, '').replace(/^tg_/, '').trim();
+      return uCleanTg === cleanId || uCleanId === cleanId;
+    });
+
+    if (existingUser) {
+      existingUser.role = 'ORGANIZER';
+      existingUser.organizerRequestStatus = 'approved';
+      await updateDoc(doc(firestore, 'users', existingUser.id), {
+        role: 'ORGANIZER',
+        organizerRequestStatus: 'approved',
+      }).catch((err) => console.warn('Could not update user document role:', err));
+    }
+    this.notify();
     return true;
   }
 
   public async removeApprovedOrganizerId(telegramUserId: string): Promise<boolean> {
-    const cleanId = telegramUserId.trim().replace(/^tg_/, '');
+    const cleanId = String(telegramUserId)
+      .replace(/^user_tg_/, '')
+      .replace(/^user_/, '')
+      .replace(/^tg_/, '')
+      .trim();
     if (!cleanId) return false;
     await deleteDoc(doc(firestore, 'approvedOrganizers', cleanId));
 
+    this.approvedOrganizerIds = this.approvedOrganizerIds.filter((id) => {
+      const normalized = id.replace(/^user_tg_/, '').replace(/^user_/, '').replace(/^tg_/, '').trim();
+      return normalized !== cleanId;
+    });
+
     // Demote any user with this Telegram ID back to PLAYER role in Firestore
-    const existingUser = this.users.find(
-      (u) => u.telegramUserId.replace(/^tg_/, '') === cleanId
-    );
+    const existingUser = this.users.find((u) => {
+      const uCleanTg = (u.telegramUserId || '').replace(/^user_tg_/, '').replace(/^user_/, '').replace(/^tg_/, '').trim();
+      const uCleanId = (u.id || '').replace(/^user_tg_/, '').replace(/^user_/, '').replace(/^tg_/, '').trim();
+      return uCleanTg === cleanId || uCleanId === cleanId;
+    });
+
     if (existingUser) {
-      await updateDoc(doc(firestore, 'users', existingUser.id), { role: 'PLAYER' });
+      existingUser.role = 'PLAYER';
+      existingUser.organizerRequestStatus = 'rejected';
+      await updateDoc(doc(firestore, 'users', existingUser.id), {
+        role: 'PLAYER',
+        organizerRequestStatus: 'rejected',
+      }).catch((err) => console.warn('Could not update user document role:', err));
     }
+    this.notify();
     return true;
   }
 
-  public processTelegramUser(tgUser: TelegramUser): { isNewUser: boolean; roleGiven: 'PLAYER' | 'ORGANIZER' } {
+  public processTelegramUser(tgUser: TelegramUser): { isNewUser: boolean; roleGiven: UserRole } {
     const rawIdStr = String(tgUser.id);
-    const cleanTgId = rawIdStr.replace(/^tg_/, '');
+    const cleanTgId = rawIdStr.replace(/^user_tg_/, '').replace(/^user_/, '').replace(/^tg_/, '').trim();
     const isApproved = this.isApprovedOrganizer(cleanTgId);
 
     const existingUser = this.users.find(
       (u) =>
         u.telegramUserId === cleanTgId ||
         u.telegramUserId === `tg_${cleanTgId}` ||
-        u.id === `user_tg_${cleanTgId}`
+        u.id === `user_tg_${cleanTgId}` ||
+        u.id === `user_${cleanTgId}`
     );
 
     if (existingUser) {
-      const role: 'PLAYER' | 'ORGANIZER' = isApproved ? 'ORGANIZER' : 'PLAYER';
+      // If user is already approved as an organizer, preserve their existing perspective (ORGANIZER or PLAYER)
+      // If user is NOT approved as an organizer, force PLAYER (unless ADMIN)
+      let role: UserRole = existingUser.role;
+      if (!isApproved && role === 'ORGANIZER') {
+        role = 'PLAYER';
+      } else if (!role) {
+        role = isApproved ? 'ORGANIZER' : 'PLAYER';
+      }
+
       const updates: Record<string, any> = {};
 
       // Preserve existing custom user edits! Only populate if missing or generic placeholder.
@@ -792,8 +1227,7 @@ class DatabaseService {
       this.setActiveUserId(existingUser.id);
       return { isNewUser: false, roleGiven: role };
     } else {
-      // Every user is automatically given the role of "PLAYER".
-      // To be an "ORGANIZER", the admin must specifically grant permission (isApproved = true).
+      // Every user is automatically given the role of "PLAYER" unless pre-approved as Organizer.
       const role: 'PLAYER' | 'ORGANIZER' = isApproved ? 'ORGANIZER' : 'PLAYER';
       const fullName = [tgUser.first_name, tgUser.last_name].filter(Boolean).join(' ') || `TG Competitor #${cleanTgId}`;
       const username = tgUser.username || `tg_user_${cleanTgId}`;
@@ -886,17 +1320,23 @@ class DatabaseService {
   public async toggleUserRole(userId: string): Promise<void> {
     const user = this.users.find((u) => u.id === userId);
     if (user) {
-      const cleanTgId = user.telegramUserId.replace(/^tg_/, '');
-      const isCurrentlyApproved = this.isApprovedOrganizer(user.telegramUserId);
+      const isCurrentlyApproved = this.isApprovedOrganizer(user.telegramUserId || user.id);
 
-      // Users CANNOT self-grant ORGANIZER role without Admin approval
+      // Users CANNOT self-grant ORGANIZER perspective without authoritative Admin approval
       if (user.role === 'PLAYER' && !isCurrentlyApproved) {
         throw new Error('ORGANIZER_APPROVAL_REQUIRED: Organizer access requires Admin approval.');
       }
 
       const newRole: UserRole = user.role === 'PLAYER' ? 'ORGANIZER' : 'PLAYER';
-      await updateDoc(doc(firestore, 'users', userId), { role: newRole });
+      
+      // Update the client in-memory perspective state cleanly without violating Firestore security rules
       user.role = newRole;
+
+      // Only attempt Firestore write if the caller is an authenticated Admin (since non-admins cannot mutate role)
+      if (this.isFirebaseAdminAuthenticated()) {
+        await updateDoc(doc(firestore, 'users', userId), { role: newRole }).catch(() => {});
+      }
+
       this.notify();
     }
   }
@@ -904,12 +1344,17 @@ class DatabaseService {
   public async adminGrantOrganizer(userId: string): Promise<void> {
     const user = this.getUserById(userId);
     if (!user) return;
-    const cleanTgId = user.telegramUserId.replace(/^tg_/, '');
+    const cleanTgId = (user.telegramUserId || user.id)
+      .replace(/^user_tg_/, '')
+      .replace(/^user_/, '')
+      .replace(/^tg_/, '')
+      .trim();
 
     await updateDoc(doc(firestore, 'users', userId), {
       role: 'ORGANIZER',
       organizerRequestStatus: 'approved',
-    });
+    }).catch(() => {});
+
     await setDoc(doc(firestore, 'approvedOrganizers', cleanTgId), {
       approved: true,
       createdAt: new Date().toISOString(),
@@ -919,6 +1364,7 @@ class DatabaseService {
       this.approvedOrganizerIds.push(cleanTgId);
     }
     user.role = 'ORGANIZER';
+    user.organizerRequestStatus = 'approved';
 
     this.addNotification({
       userId,
@@ -933,16 +1379,25 @@ class DatabaseService {
   public async adminRevokeOrganizer(userId: string): Promise<void> {
     const user = this.getUserById(userId);
     if (!user) return;
-    const cleanTgId = user.telegramUserId.replace(/^tg_/, '');
+    const cleanTgId = (user.telegramUserId || user.id)
+      .replace(/^user_tg_/, '')
+      .replace(/^user_/, '')
+      .replace(/^tg_/, '')
+      .trim();
 
     await updateDoc(doc(firestore, 'users', userId), {
       role: 'PLAYER',
       organizerRequestStatus: 'rejected',
-    });
+    }).catch(() => {});
+
     await deleteDoc(doc(firestore, 'approvedOrganizers', cleanTgId)).catch(() => {});
 
-    this.approvedOrganizerIds = this.approvedOrganizerIds.filter((id) => id !== cleanTgId);
+    this.approvedOrganizerIds = this.approvedOrganizerIds.filter((id) => {
+      const normalized = id.replace(/^user_tg_/, '').replace(/^user_/, '').replace(/^tg_/, '').trim();
+      return normalized !== cleanTgId;
+    });
     user.role = 'PLAYER';
+    user.organizerRequestStatus = 'rejected';
 
     this.addNotification({
       userId,
@@ -963,10 +1418,22 @@ class DatabaseService {
     const user = this.getUserById(userId);
     if (!user) return false;
 
-    const reqId = `req_${userId}`;
-    const cleanTgId = user.telegramUserId.replace(/^tg_/, '');
+    // Idempotency check 1: If user is already approved as an organizer, do NOT create another request
+    if (this.isApprovedOrganizer(user.telegramUserId || user.id)) {
+      return true;
+    }
 
-    await setDoc(doc(firestore, 'organizerRequests', reqId), {
+    const reqId = `req_${userId}`;
+    const cleanTgId = (user.telegramUserId || '').replace(/^user_tg_/, '').replace(/^user_/, '').replace(/^tg_/, '').trim();
+
+    // Idempotency check 2: If a request is already pending, do NOT duplicate
+    const existingReq = this.organizerRequests.find((r) => r.id === reqId || r.userId === userId);
+    if (existingReq && existingReq.status === 'pending') {
+      return true;
+    }
+
+    const newReq: OrganizerRequest = {
+      id: reqId,
       userId,
       userName: user.name,
       username: user.username,
@@ -974,11 +1441,33 @@ class DatabaseService {
       reason,
       status: 'pending',
       requestedAt: new Date().toISOString(),
-    });
+    };
 
-    await updateDoc(doc(firestore, 'users', userId), {
-      organizerRequestReason: reason,
-    }).catch(() => {});
+    const existingIdx = this.organizerRequests.findIndex((r) => r.id === reqId || r.userId === userId);
+    if (existingIdx >= 0) {
+      this.organizerRequests[existingIdx] = newReq;
+    } else {
+      this.organizerRequests.push(newReq);
+    }
+    this.notify();
+
+    try {
+      await setDoc(doc(firestore, 'organizerRequests', reqId), {
+        userId,
+        userName: user.name,
+        username: user.username,
+        telegramUserId: cleanTgId,
+        reason,
+        status: 'pending',
+        requestedAt: new Date().toISOString(),
+      });
+
+      await updateDoc(doc(firestore, 'users', userId), {
+        organizerRequestReason: reason,
+      }).catch(() => {});
+    } catch (err) {
+      console.error('Error saving organizer request to Firestore:', err);
+    }
 
     return true;
   }
@@ -1119,7 +1608,11 @@ class DatabaseService {
   }
 
   public getUserById(id: string): User | undefined {
-    return this.users.find((u) => u.id === id);
+    const found = this.users.find((u) => u.id === id);
+    if (!found && id && !id.startsWith('demo_')) {
+      this.queueUserFetch(id);
+    }
+    return found;
   }
 
   public async updateUser(updatedUser: Partial<User> & { id: string }): Promise<void> {
@@ -1144,6 +1637,10 @@ class DatabaseService {
       const existingCache = localStorage.getItem(`SG_USER_CACHE_${updatedUser.id}`);
       const cacheObj = existingCache ? JSON.parse(existingCache) : {};
       const mergedCache = { ...cacheObj, ...(user || {}), ...safeUser };
+      // Preserve existing authoritative role for non-admin updates
+      if (!this.isFirebaseAdminAuthenticated() && user?.role) {
+        mergedCache.role = user.role;
+      }
       localStorage.setItem(`SG_USER_CACHE_${updatedUser.id}`, JSON.stringify(mergedCache));
     } catch (e) {
       console.warn('LocalStorage save error:', e);
@@ -1378,25 +1875,6 @@ class DatabaseService {
         console.warn('[ADMIN LOGIN] Non-fatal localStorage error:', err);
       }
 
-      // Non-blocking sync to Firestore for admin doc
-      try {
-        const adminDocRef = doc(firestore, 'users', 'admin_1');
-        setDoc(
-          adminDocRef,
-          {
-            id: 'admin_1',
-            name: 'System Admin',
-            username: 'admin',
-            role: 'ADMIN',
-            firebaseAuthUid: fbUser.uid,
-            email: fbUser.email || email.trim(),
-          },
-          { merge: true }
-        ).catch((err) => console.warn('[ADMIN LOGIN] Non-fatal admin_1 sync warning:', err));
-      } catch (err) {
-        console.warn('[ADMIN LOGIN] Non-fatal admin doc error:', err);
-      }
-
       console.log('[ADMIN LOGIN] login complete');
       this.notify();
       return true;
@@ -1474,7 +1952,12 @@ class DatabaseService {
 
   // Organizers only manage tournaments they created
   public getOrganizerTournaments(organizerId: string): Tournament[] {
-    return this.tournaments.filter((t) => t.organizerId === organizerId);
+    const cleanId = organizerId.replace(/^user_/, '').replace(/^tg_/, '');
+    return this.tournaments.filter((t) => {
+      if (t.organizerId === organizerId) return true;
+      const tourOrgClean = (t.organizerId || '').replace(/^user_/, '').replace(/^tg_/, '');
+      return Boolean(cleanId && tourOrgClean && (tourOrgClean === cleanId || tourOrgClean.includes(cleanId) || cleanId.includes(tourOrgClean)));
+    });
   }
 
   public getTournamentById(id: string): Tournament | undefined {
@@ -1486,15 +1969,57 @@ class DatabaseService {
     const cleanParam = decodeURIComponent(startParam).trim();
     if (!cleanParam) return undefined;
 
-    // 1. Direct match
+    // Explicitly reject navigation tab keywords from tournament lookup
+    const lowerParam = cleanParam.toLowerCase();
+    if (
+      lowerParam === 'home' ||
+      lowerParam === 'tournaments' ||
+      lowerParam === 'tournament' ||
+      lowerParam === 'tournament_center' ||
+      lowerParam === 'tours' ||
+      lowerParam === 'players' ||
+      lowerParam === 'profile' ||
+      lowerParam === 'organizer_panel' ||
+      lowerParam === 'manage'
+    ) {
+      return undefined;
+    }
+
+    // 1. Direct ID match
     let found = this.tournaments.find((t) => t.id === cleanParam);
     if (found) return found;
 
-    // 2. Strip "tour_tour_" or "tour_"
-    const stripped = cleanParam.replace(/^tour_tour_/, '').replace(/^tour_/, '');
+    // 2. Direct tournamentCode match (4-digit numeric search e.g. "0001", "0047")
+    if (cleanParam.length <= 6) {
+      const codeMatch = cleanParam.replace(/^#/, '').trim();
+      if (codeMatch) {
+        found = this.tournaments.find(
+          (t) => t.tournamentCode && (t.tournamentCode === codeMatch || t.tournamentCode === codeMatch.padStart(4, '0'))
+        );
+        if (found) return found;
+      }
+    }
+
+    // 3. Strip prefixes like "tournament_", "tour_tour_", "tour_"
+    const stripped = cleanParam
+      .replace(/^tournament_/, '')
+      .replace(/^tour_tour_/, '')
+      .replace(/^tour_/, '');
     if (stripped) {
+      // Check if stripped matches tournamentCode (e.g. startapp=tournament_0047 -> stripped "0047")
       found = this.tournaments.find(
-        (t) => t.id === stripped || t.id === `tour_${stripped}` || t.id === `tour_tour_${stripped}`
+        (t) =>
+          t.tournamentCode &&
+          (t.tournamentCode === stripped ||
+            t.tournamentCode === stripped.padStart(4, '0'))
+      );
+      if (found) return found;
+
+      found = this.tournaments.find(
+        (t) =>
+          t.id === stripped ||
+          t.id === `tour_${stripped}` ||
+          t.id === `tour_tour_${stripped}`
       );
       if (found) return found;
 
@@ -1502,9 +2027,12 @@ class DatabaseService {
       if (found) return found;
     }
 
-    // 3. Fallback search
+    // 4. Fallback search by ID or tournamentCode
     return this.tournaments.find(
-      (t) => cleanParam.includes(t.id) || t.id.includes(cleanParam)
+      (t) =>
+        cleanParam.includes(t.id) ||
+        t.id.includes(cleanParam) ||
+        (t.tournamentCode && (cleanParam.includes(t.tournamentCode) || t.tournamentCode.includes(cleanParam)))
     );
   }
 
@@ -1771,6 +2299,69 @@ class DatabaseService {
     return this.roundScores.filter((s) => s.tournamentId === tournamentId);
   }
 
+  public async generateNextTournamentCode(): Promise<string> {
+    const counterRef = doc(firestore, 'counters', 'tournaments');
+    try {
+      const nextCode = await runTransaction(firestore, async (transaction) => {
+        const counterDoc = await transaction.get(counterRef);
+        let currentSeq = 0;
+        if (counterDoc.exists()) {
+          const data = counterDoc.data();
+          if (typeof data.lastCode === 'number') {
+            currentSeq = data.lastCode;
+          } else if (typeof data.lastCode === 'string') {
+            currentSeq = parseInt(data.lastCode, 10) || 0;
+          }
+        }
+
+        // If counter doc not initialized or lower than existing tournaments in memory, determine max
+        if (currentSeq === 0) {
+          const existingMax = this.tournaments.reduce((max, t) => {
+            if (t.tournamentCode) {
+              const num = parseInt(t.tournamentCode, 10);
+              return !isNaN(num) && num > max ? num : max;
+            }
+            return max;
+          }, 0);
+          if (existingMax > currentSeq) {
+            currentSeq = existingMax;
+          }
+        }
+
+        const nextSeq = currentSeq + 1;
+        if (nextSeq > 9999) {
+          throw new Error('Tournament code range (0001-9999) exhausted.');
+        }
+
+        const formattedCode = nextSeq.toString().padStart(4, '0');
+        transaction.set(counterRef, {
+          lastCode: nextSeq,
+          formattedCode,
+          updatedAt: new Date().toISOString(),
+        }, { merge: true });
+
+        return formattedCode;
+      });
+
+      return nextCode;
+    } catch (err) {
+      console.warn('Transaction failed for tournamentCode counter, falling back to deterministic local allocation:', err);
+      // Fallback: calculate strictly based on highest known tournamentCode
+      const existingMax = this.tournaments.reduce((max, t) => {
+        if (t.tournamentCode) {
+          const num = parseInt(t.tournamentCode, 10);
+          return !isNaN(num) && num > max ? num : max;
+        }
+        return max;
+      }, 0);
+      const nextSeq = existingMax + 1;
+      if (nextSeq > 9999) {
+        throw new Error('Tournament code range (0001-9999) exhausted.');
+      }
+      return nextSeq.toString().padStart(4, '0');
+    }
+  }
+
   public async createTournament(data: Omit<Tournament, 'id'>): Promise<Tournament> {
     const id = 'tour_' + Date.now();
     const format = data.format || 'elimination';
@@ -1781,6 +2372,12 @@ class DatabaseService {
     // Admin approval default: requires approval unless specified
     const isApproved = data.isApproved !== undefined ? data.isApproved : false;
 
+    // Generate or use provided sequential 4-digit tournament code
+    let tournamentCode = data.tournamentCode;
+    if (!tournamentCode) {
+      tournamentCode = await this.generateNextTournamentCode();
+    }
+
     let safeImage = data.image;
     if (safeImage && safeImage.startsWith('data:image/')) {
       safeImage = await compressImage(safeImage, 800, 450, 0.7);
@@ -1790,6 +2387,7 @@ class DatabaseService {
       ...data,
       image: safeImage,
       id,
+      tournamentCode,
       format,
       groupSize,
       currentRound,
@@ -1815,6 +2413,7 @@ class DatabaseService {
       organizerId: data.organizerId,
       createdAt: new Date().toISOString(),
       id,
+      tournamentCode,
       tournamentName: data.tournamentName,
       venueName: data.venueName || '',
       venueLocation: data.venueLocation || data.venueName || 'Addis Ababa',
@@ -2777,7 +3376,7 @@ class DatabaseService {
     {
       id: 'notif_1',
       userId: 'user_tg_77201948',
-      title: 'Welcome to Sefer Gamers!',
+      title: 'Welcome to Awedadari!',
       message: 'Explore upcoming gaming tournaments, join brackets, and compete for top ranks.',
       type: 'system',
       createdAt: new Date().toISOString(),
@@ -2939,161 +3538,544 @@ class DatabaseService {
   }
 
   // =========================================================================
-  // ACCUMULATIVE PLAYER RANKINGS & ORGANIZER STATS
+  // GAME-SPECIFIC COMPETITIVE PLAYER RATING & LEADERBOARD ENGINE
   // =========================================================================
-  private getRankPointsForPosition(rank: number): number {
-    if (rank === 1) return 15;
-    if (rank === 2) return 12;
-    if (rank === 3) return 10;
-    if (rank === 4) return 8;
-    if (rank === 5) return 7;
-    if (rank === 6) return 6;
-    if (rank === 7) return 5;
-    if (rank === 8) return 4;
-    if (rank >= 9 && rank <= 16) return 3;
-    if (rank >= 17 && rank <= 32) return 2;
-    if (rank >= 33) return 1;
-    return 0;
+
+  public static normalizeGameKey(gameName?: string): string {
+    if (!gameName) return 'efootball';
+    return gameName.trim().toLowerCase().replace(/\s+/g, ' ');
   }
 
-  public calculatePlayerRankPoints(userId: string) {
-    // Read only tournaments with status 'Finished' or 'Completed'
-    const finishedTournaments = this.tournaments.filter(
-      (t) => t.status === 'Finished' || t.status === 'Completed'
+  public static getGameDisplayInfo(gameName?: string): { key: string; name: string; icon: string } {
+    const key = DatabaseService.normalizeGameKey(gameName);
+    const lower = key.toLowerCase();
+    let icon = '🎮';
+    if (
+      lower.includes('efootball') ||
+      lower.includes('pes') ||
+      lower.includes('fifa') ||
+      lower.includes('fc 2') ||
+      lower.includes('ea sports') ||
+      lower.includes('soccer')
+    ) {
+      icon = '⚽';
+    } else if (
+      lower.includes('pubg') ||
+      lower.includes('cod') ||
+      lower.includes('call of duty') ||
+      lower.includes('free fire') ||
+      lower.includes('battle royale')
+    ) {
+      icon = '🎯';
+    } else if (
+      lower.includes('tekken') ||
+      lower.includes('mortal kombat') ||
+      lower.includes('street fighter') ||
+      lower.includes('smash') ||
+      lower.includes('fighter')
+    ) {
+      icon = '🥊';
+    } else if (lower.includes('chess') || lower.includes('checkers')) {
+      icon = '♟️';
+    } else if (
+      lower.includes('asphalt') ||
+      lower.includes('need for speed') ||
+      lower.includes('racing') ||
+      lower.includes('f1')
+    ) {
+      icon = '🏎️';
+    } else if (lower.includes('nba') || lower.includes('basketball')) {
+      icon = '🏀';
+    }
+    return { key, name: gameName?.trim() || 'Custom Game', icon };
+  }
+
+  public getBasePlacementPoints(rank: number): number {
+    if (rank <= 0 || !Number.isFinite(rank)) return 0;
+    const r = Math.round(rank);
+    const baseMap: Record<number, number> = {
+      1: 15,
+      2: 10,
+      3: 8,
+      4: 6,
+      5: 4,
+      6: 2,
+      7: 1,
+      8: 1,
+    };
+    if (baseMap[r] !== undefined) return baseMap[r];
+    // Controlled diminishing table for positions 9+
+    if (r >= 9 && r <= 16) return 0.5;
+    if (r >= 17 && r <= 32) return 0.25;
+    return 0.1;
+  }
+
+  public calculateTournamentSizeMultiplier(participantCount: number): number {
+    const count = Math.max(2, participantCount || 2);
+    // Doubling-style scaling: 8 players -> 0.5, 16 players -> 1.0, 32 players -> 2.0, 64 players -> 4.0 (2x of 32)
+    const raw = count / 16;
+    return Math.max(0.25, Math.min(8.0, Number(raw.toFixed(4))));
+  }
+
+  public calculateTournamentStrengthMultiplier(preTournamentRatings: number[]): number {
+    if (!preTournamentRatings || preTournamentRatings.length === 0) return 1.0;
+    const validRatings = preTournamentRatings.map((r) => (Number.isFinite(r) && r > 0 ? r : 1000));
+    const sum = validRatings.reduce((a, b) => a + b, 0);
+    const avg = sum / validRatings.length;
+    const raw = avg / 1000;
+    // Clamped safely between 0.6 (weak/novice field) and 1.8 (elite/grandmaster field)
+    return Math.max(0.6, Math.min(1.8, Number(raw.toFixed(4))));
+  }
+
+  public calculateRatingDelta(
+    basePoints: number,
+    sizeMultiplier: number,
+    strengthMultiplier: number,
+    previousRating: number
+  ): number {
+    const earnedReward = basePoints * sizeMultiplier * strengthMultiplier;
+    // Soft-cap resistance for high ratings to prevent runaway inflation while allowing beginners to climb
+    const prev = Number.isFinite(previousRating) && previousRating > 0 ? previousRating : 1000;
+    const resistanceFactor = Math.max(0.25, 1 - Math.max(0, prev - 1000) / 4000);
+    const delta = earnedReward * resistanceFactor;
+    return Math.max(0, Number(delta.toFixed(2)));
+  }
+
+  public getAvailableGames(): GameCategoryInfo[] {
+    const gameMap = new Map<
+      string,
+      {
+        key: string;
+        name: string;
+        icon: string;
+        completedTournamentsCount: number;
+        totalTournamentsCount: number;
+      }
+    >();
+
+    // Seed recognized common esports games so player can always filter even before completed events
+    const defaults = [
+      { name: 'eFootball', icon: '⚽' },
+      { name: 'PUBG Mobile', icon: '🎯' },
+      { name: 'EA SPORTS FC 26', icon: '⚽' },
+      { name: 'Tekken 8', icon: '🥊' },
+      { name: 'Free Fire', icon: '🎯' },
+      { name: 'Call of Duty Mobile', icon: '🎯' },
+      { name: 'Chess', icon: '♟️' },
+      { name: 'Asphalt', icon: '🏎️' },
+    ];
+
+    for (const d of defaults) {
+      const info = DatabaseService.getGameDisplayInfo(d.name);
+      gameMap.set(info.key, {
+        key: info.key,
+        name: d.name,
+        icon: d.icon,
+        completedTournamentsCount: 0,
+        totalTournamentsCount: 0,
+      });
+    }
+
+    // Inspect all tournaments in the database
+    for (const t of this.tournaments) {
+      if (!t.game) continue;
+      const info = DatabaseService.getGameDisplayInfo(t.game);
+      const isCompleted =
+        (t.status === 'Completed' || t.status === 'Finished') &&
+        t.finalStandings &&
+        t.finalStandings.length > 0;
+
+      const existing = gameMap.get(info.key);
+      if (existing) {
+        existing.totalTournamentsCount += 1;
+        if (isCompleted) existing.completedTournamentsCount += 1;
+      } else {
+        gameMap.set(info.key, {
+          key: info.key,
+          name: t.game.trim(),
+          icon: info.icon,
+          completedTournamentsCount: isCompleted ? 1 : 0,
+          totalTournamentsCount: 1,
+        });
+      }
+    }
+
+    // Sort games: most completed tournaments first, then total tournaments, then alphabetical
+    return Array.from(gameMap.values()).sort((a, b) => {
+      if (b.completedTournamentsCount !== a.completedTournamentsCount) {
+        return b.completedTournamentsCount - a.completedTournamentsCount;
+      }
+      if (b.totalTournamentsCount !== a.totalTournamentsCount) {
+        return b.totalTournamentsCount - a.totalTournamentsCount;
+      }
+      return a.name.localeCompare(b.name);
+    });
+  }
+
+  /**
+   * Centralized Chronological Rating Replay Engine
+   * Computes per-game ratings and career stats deterministically.
+   */
+  public calculateAllGameRankings(): Map<
+    string,
+    Map<
+      string,
+      {
+        rating: number;
+        stats: PlayerGameStats;
+      }
+    >
+  > {
+    const gameRankings = new Map<
+      string,
+      Map<
+        string,
+        {
+          rating: number;
+          stats: PlayerGameStats;
+        }
+      >
+    >();
+
+    // 1. Gather all official completed tournaments with valid finalStandings
+    const completedTournaments = this.tournaments.filter(
+      (t) =>
+        (t.status === 'Completed' || t.status === 'Finished') &&
+        t.finalStandings &&
+        Array.isArray(t.finalStandings) &&
+        t.finalStandings.length > 0 &&
+        !!t.game
     );
 
-    let totalRankPoints = 0;
-    let participationPoints = 0;
-    let eventsPlayed = 0;
-    let wins = 0;
-    let runnerUps = 0;
-    let thirdPlaces = 0;
-    let mvpCount = 0;
-    const ranksList: number[] = [];
-    const gamesPlayedSet = new Set<string>();
+    // 2. Sort chronologically using tournament date & time (with ID stable secondary fallback)
+    completedTournaments.sort((a, b) => {
+      const timeStrA = `${a.date || '2026-01-01'} ${a.time || '00:00'}`;
+      const timeStrB = `${b.date || '2026-01-01'} ${b.time || '00:00'}`;
+      const timeA = new Date(timeStrA).getTime() || 0;
+      const timeB = new Date(timeStrB).getTime() || 0;
+      if (timeA !== timeB) return timeA - timeB;
+      return (a.id || '').localeCompare(b.id || '');
+    });
 
-    for (const t of finishedTournaments) {
-      // Participant check: in tournamentPlayers or in finalStandings
-      const tpRecord = this.tournamentPlayers.find(
-        (tp) => tp.tournamentId === t.id && tp.userId === userId
-      );
-      const fsRecord = t.finalStandings?.find((s) => s.userId === userId);
-      const isParticipant = !!tpRecord || !!fsRecord;
+    // 3. Process each tournament chronologically by game
+    for (const t of completedTournaments) {
+      const gameInfo = DatabaseService.getGameDisplayInfo(t.game);
+      const gameKey = gameInfo.key;
 
-      if (isParticipant) {
-        eventsPlayed += 1;
-        participationPoints += 1; // +1 Participation Point per finished tournament attended
-        if (t.game) gamesPlayedSet.add(t.game);
+      if (!gameRankings.has(gameKey)) {
+        gameRankings.set(gameKey, new Map());
       }
+      const playerMap = gameRankings.get(gameKey)!;
 
-      // 1. RANK POINTS from Final Result table under Standings
-      if (fsRecord) {
-        const r = fsRecord.rank;
-        ranksList.push(r);
+      // Identify all participating players in this tournament
+      // PARTICIPATION CRITERIA:
+      // 1. Appears in authoritative FINAL RESULTS
+      // OR
+      // 2. Explicitly checked-in / participated in the tournament (NOT merely registered)
+      const finalStandingUserIds = (t.finalStandings || [])
+        .map((s) => s.userId)
+        .filter((id) => typeof id === 'string' && id.trim().length > 0);
 
-        const rPts = this.getRankPointsForPosition(r);
-        totalRankPoints += rPts;
+      const checkedInUserIds = this.tournamentPlayers
+        .filter((tp) => {
+          if (tp.tournamentId !== t.id || !tp.userId) return false;
+          const status = ((tp.playerStatus || (tp as any).status || '') + '').toLowerCase().trim();
+          const isCheckedIn =
+            (tp as any).isCheckedIn === true ||
+            status === 'checked in' ||
+            status === 'playing' ||
+            status === 'eliminated' ||
+            status === 'champion' ||
+            status === 'runner-up' ||
+            status === 'semi-finalist';
+          return isCheckedIn;
+        })
+        .map((tp) => tp.userId);
 
-        if (r === 1) wins += 1;
-        if (r === 2) runnerUps += 1;
-        if (r === 3) thirdPlaces += 1;
+      const activeMatchPlayerIds = this.matches
+        .filter((m) => m.tournamentId === t.id)
+        .flatMap((m) => [m.playerAId, m.playerBId])
+        .filter((id): id is string => Boolean(id && typeof id === 'string' && id.trim().length > 0));
 
-        if (fsRecord.badge && fsRecord.badge.toUpperCase().includes('MVP')) {
-          mvpCount += 1;
+      const activeGroupPlayerIds = this.tournamentGroups
+        .filter((g) => g.tournamentId === t.id)
+        .flatMap((g) => g.playerIds || [])
+        .filter((id): id is string => Boolean(id && typeof id === 'string' && id.trim().length > 0));
+
+      const activeSessionPlayerIds = this.tournamentSessions
+        .filter((s) => s.tournamentId === t.id)
+        .flatMap((s) => (s.scores || []).map((sc) => sc.userId))
+        .filter((id): id is string => Boolean(id && typeof id === 'string' && id.trim().length > 0));
+
+      const activeScorePlayerIds = this.roundScores
+        .filter((rs) => rs.tournamentId === t.id)
+        .map((rs) => rs.userId)
+        .filter((id): id is string => Boolean(id && typeof id === 'string' && id.trim().length > 0));
+
+      const allParticipantIds = Array.from(
+        new Set([
+          ...finalStandingUserIds,
+          ...checkedInUserIds,
+          ...activeMatchPlayerIds,
+          ...activeGroupPlayerIds,
+          ...activeSessionPlayerIds,
+          ...activeScorePlayerIds,
+        ])
+      );
+      const participantCount = Math.max(allParticipantIds.length, finalStandingUserIds.length, 2);
+
+      // Pre-tournament ratings for participant field
+      const preRatings = allParticipantIds.map((uid) => {
+        const record = playerMap.get(uid);
+        return record ? record.rating : 1000;
+      });
+
+      const sizeMult = this.calculateTournamentSizeMultiplier(participantCount);
+      const strengthMult = this.calculateTournamentStrengthMultiplier(preRatings);
+
+      // Process official placement rewards from finalStandings
+      for (let idx = 0; idx < t.finalStandings!.length; idx++) {
+        const standing = t.finalStandings![idx];
+        const userId = standing.userId;
+        if (!userId || typeof userId !== 'string') continue;
+
+        // Resolve explicit rank
+        let rank = standing.rank;
+        if (!rank || !Number.isFinite(rank) || rank <= 0) {
+          const badgeUpper = (standing.badge || '').toUpperCase();
+          if (badgeUpper.includes('CHAMPION') || badgeUpper.includes('1ST') || badgeUpper.includes('GOLD')) {
+            rank = 1;
+          } else if (badgeUpper.includes('RUNNER') || badgeUpper.includes('2ND') || badgeUpper.includes('SILVER')) {
+            rank = 2;
+          } else if (badgeUpper.includes('THIRD') || badgeUpper.includes('3RD') || badgeUpper.includes('BRONZE')) {
+            rank = 3;
+          } else {
+            rank = idx + 1;
+          }
+        }
+        rank = Math.round(rank);
+
+        // Get or initialize player record in this game
+        let playerRecord = playerMap.get(userId);
+        if (!playerRecord) {
+          playerRecord = {
+            rating: 1000,
+            stats: {
+              gameKey,
+              gameName: gameInfo.name,
+              rating: 1000,
+              tournamentsPlayed: 0,
+              wins: 0,
+              runnerUps: 0,
+              thirdPlaces: 0,
+              podiums: 0,
+              top8: 0,
+              bestFinishRank: null,
+              bestFinishLabel: 'N/A',
+              averageFinish: 'N/A',
+              earnedPointsTotal: 0,
+              ranksList: [],
+            },
+          };
+          playerMap.set(userId, playerRecord);
+        }
+
+        const preRating = playerRecord.rating;
+        const basePlacementPts = this.getBasePlacementPoints(rank);
+        const ratingDelta = this.calculateRatingDelta(
+          basePlacementPts,
+          sizeMult,
+          strengthMult,
+          preRating
+        );
+
+        // Update competitive rating
+        const newRating = Math.round(preRating + ratingDelta);
+        playerRecord.rating = newRating;
+
+        // Update game statistics
+        const stats = playerRecord.stats;
+        stats.rating = newRating;
+        stats.tournamentsPlayed += 1;
+        stats.earnedPointsTotal += Number((basePlacementPts * sizeMult * strengthMult).toFixed(2));
+        stats.ranksList.push(rank);
+
+        if (rank === 1) stats.wins += 1;
+        if (rank === 2) stats.runnerUps += 1;
+        if (rank === 3) stats.thirdPlaces += 1;
+        if (rank <= 3) stats.podiums += 1;
+        if (rank <= 8) stats.top8 += 1;
+
+        if (stats.ranksList.length > 0) {
+          stats.bestFinishRank = Math.min(...stats.ranksList);
+          stats.bestFinishLabel = `#${stats.bestFinishRank}`;
+          const avg = stats.ranksList.reduce((sum, v) => sum + v, 0) / stats.ranksList.length;
+          stats.averageFinish = avg.toFixed(1);
         }
       }
     }
 
-    // FINAL PLAYER RATING = Total Rank Points + Participation Points
-    const rankPoints = totalRankPoints + participationPoints;
-    const top3 = wins + runnerUps + thirdPlaces;
-
-    let bestFinishRank: number | null = null;
-    let bestFinishLabel = 'N/A';
-    if (ranksList.length > 0) {
-      bestFinishRank = Math.min(...ranksList);
-      bestFinishLabel = `#${bestFinishRank}`;
-    }
-
-    let averageFinish = 'N/A';
-    if (ranksList.length > 0) {
-      const avg = ranksList.reduce((sum, v) => sum + v, 0) / ranksList.length;
-      averageFinish = avg.toFixed(1);
-    }
-
-    // Match level stats
-    const userMatches = this.matches.filter(
-      (m) => m.status === 'Finished' && (m.playerAId === userId || m.playerBId === userId)
-    );
-    const totalMatchesPlayed = userMatches.length;
-    const matchWins = userMatches.filter((m) => m.winnerId === userId).length;
-
-    const badges: Array<{ label: string; count: number; icon: string }> = [];
-    if (wins > 0) badges.push({ label: 'Champion', count: wins, icon: '🏆' });
-    if (runnerUps > 0) badges.push({ label: 'Runner-up', count: runnerUps, icon: '🥈' });
-    if (thirdPlaces > 0) badges.push({ label: 'Third Place', count: thirdPlaces, icon: '🥉' });
-    if (mvpCount > 0) badges.push({ label: 'MVP', count: mvpCount, icon: '⭐' });
-
-    return {
-      rankPoints, // Final Player Rating
-      totalRankPoints,
-      participationPoints,
-      eventsPlayed,
-      tournamentsPlayed: eventsPlayed,
-      wins,
-      championships: wins,
-      runnerUps,
-      thirdPlaces,
-      semiFinals: thirdPlaces,
-      top3,
-      bestFinishRank,
-      bestFinishLabel,
-      averageFinish,
-      mvpCount,
-      badges,
-      matchWins,
-      totalMatchesPlayed,
-      gamesPlayed: Array.from(gamesPlayedSet),
-      breakdown: {
-        participationPts: participationPoints,
-        championshipPts: totalRankPoints,
-        runnerUpPts: 0,
-        semiFinalPts: 0,
-        matchWinPts: 0,
-        versatilityPts: 0,
-        matchPlayedPts: 0,
-      },
-    };
+    return gameRankings;
   }
 
-  public getRankedPlayers() {
+  public getRankedPlayersForGame(gameKey?: string): RankedPlayerGameProfile[] {
+    const availableGames = this.getAvailableGames();
+    let targetKey = gameKey ? DatabaseService.normalizeGameKey(gameKey) : '';
+
+    if (!targetKey || targetKey === 'all') {
+      // Default to the most active completed game or first available game
+      const topActiveGame = availableGames.find((g) => g.completedTournamentsCount > 0);
+      targetKey = topActiveGame ? topActiveGame.key : availableGames[0]?.key || 'efootball';
+    }
+
+    const targetGameInfo =
+      availableGames.find((g) => g.key === targetKey) || DatabaseService.getGameDisplayInfo(targetKey);
+
+    const allRankings = this.calculateAllGameRankings();
+    const gamePlayerMap = allRankings.get(targetKey) || new Map();
+
     const playerUsers = this.users.filter((u) => u.role === 'PLAYER');
 
-    const ranked = playerUsers.map((user) => {
-      const stats = this.calculatePlayerRankPoints(user.id);
+    const ranked: RankedPlayerGameProfile[] = playerUsers.map((user) => {
+      const record = gamePlayerMap.get(user.id);
+      const stats: PlayerGameStats = record
+        ? { ...record.stats }
+        : {
+            gameKey: targetKey,
+            gameName: targetGameInfo.name,
+            rating: 1000,
+            tournamentsPlayed: 0,
+            wins: 0,
+            runnerUps: 0,
+            thirdPlaces: 0,
+            podiums: 0,
+            top8: 0,
+            bestFinishRank: null,
+            bestFinishLabel: 'N/A',
+            averageFinish: 'N/A',
+            earnedPointsTotal: 0,
+            ranksList: [],
+          };
+
       return {
         user,
-        ...stats,
+        globalRank: 0,
+        gameKey: targetKey,
+        gameName: targetGameInfo.name,
+        stats,
+        rankPoints: stats.rating,
+        eventsPlayed: stats.tournamentsPlayed,
+        wins: stats.wins,
+        top3: stats.podiums,
+        bestFinishLabel: stats.bestFinishLabel,
       };
     });
 
-    // Tie-breakers:
-    // 1. Highest Player Rating (rankPoints)
-    // 2. More Wins
-    // 3. More Top 3 Finishes
-    // 4. More Events Played
+    // Deterministic Tie-breaking Hierarchy:
+    // 1. Higher Game Rating
+    // 2. More Tournament Championships (Wins)
+    // 3. More Podium Finishes (Top 3)
+    // 4. More Top 8 Finishes
+    // 5. More Tournaments Played
+    // 6. Better Best Finish (lower rank number is better)
+    // 7. Stable Alphabetical / ID Fallback
     ranked.sort((a, b) => {
-      if (b.rankPoints !== a.rankPoints) return b.rankPoints - a.rankPoints;
-      if (b.wins !== a.wins) return b.wins - a.wins;
-      if (b.top3 !== a.top3) return b.top3 - a.top3;
-      if (b.eventsPlayed !== a.eventsPlayed) return b.eventsPlayed - a.eventsPlayed;
-      return 0;
+      if (b.stats.rating !== a.stats.rating) return b.stats.rating - a.stats.rating;
+      if (b.stats.wins !== a.stats.wins) return b.stats.wins - a.stats.wins;
+      if (b.stats.podiums !== a.stats.podiums) return b.stats.podiums - a.stats.podiums;
+      if (b.stats.top8 !== a.stats.top8) return b.stats.top8 - a.stats.top8;
+      if (b.stats.tournamentsPlayed !== a.stats.tournamentsPlayed) {
+        return b.stats.tournamentsPlayed - a.stats.tournamentsPlayed;
+      }
+      const bestA = a.stats.bestFinishRank ?? 9999;
+      const bestB = b.stats.bestFinishRank ?? 9999;
+      if (bestA !== bestB) return bestA - bestB;
+
+      const nameCompare = (a.user.name || '').localeCompare(b.user.name || '');
+      if (nameCompare !== 0) return nameCompare;
+      return (a.user.id || '').localeCompare(b.user.id || '');
     });
 
     return ranked.map((item, idx) => ({
       ...item,
       globalRank: idx + 1,
     }));
+  }
+
+  public getPlayerGameStats(userId: string, gameKey: string): PlayerGameStats {
+    const normKey = DatabaseService.normalizeGameKey(gameKey);
+    const allRankings = this.calculateAllGameRankings();
+    const gameMap = allRankings.get(normKey);
+    const record = gameMap?.get(userId);
+    if (record) return { ...record.stats };
+
+    const gameInfo = DatabaseService.getGameDisplayInfo(gameKey);
+    return {
+      gameKey: normKey,
+      gameName: gameInfo.name,
+      rating: 1000,
+      tournamentsPlayed: 0,
+      wins: 0,
+      runnerUps: 0,
+      thirdPlaces: 0,
+      podiums: 0,
+      top8: 0,
+      bestFinishRank: null,
+      bestFinishLabel: 'N/A',
+      averageFinish: 'N/A',
+      earnedPointsTotal: 0,
+      ranksList: [],
+    };
+  }
+
+  public getPlayerAllGameStats(userId: string): PlayerGameStats[] {
+    const availableGames = this.getAvailableGames();
+    return availableGames.map((g) => this.getPlayerGameStats(userId, g.key));
+  }
+
+  public getRankedPlayers(): RankedPlayerGameProfile[] {
+    return this.getRankedPlayersForGame();
+  }
+
+  public calculatePlayerRankPoints(userId: string) {
+    const allGames = this.getAvailableGames();
+    const primaryGame = allGames.find((g) => g.completedTournamentsCount > 0) || allGames[0];
+    const stats = this.getPlayerGameStats(userId, primaryGame?.key || 'efootball');
+
+    return {
+      rankPoints: stats.rating,
+      totalRankPoints: stats.earnedPointsTotal,
+      participationPoints: stats.tournamentsPlayed,
+      eventsPlayed: stats.tournamentsPlayed,
+      tournamentsPlayed: stats.tournamentsPlayed,
+      wins: stats.wins,
+      championships: stats.wins,
+      runnerUps: stats.runnerUps,
+      thirdPlaces: stats.thirdPlaces,
+      semiFinals: stats.thirdPlaces,
+      top3: stats.podiums,
+      bestFinishRank: stats.bestFinishRank,
+      bestFinishLabel: stats.bestFinishLabel,
+      averageFinish: stats.averageFinish,
+      mvpCount: 0,
+      badges: [
+        ...(stats.wins > 0 ? [{ label: 'Champion', count: stats.wins, icon: '🏆' }] : []),
+        ...(stats.runnerUps > 0 ? [{ label: 'Runner-up', count: stats.runnerUps, icon: '🥈' }] : []),
+        ...(stats.thirdPlaces > 0 ? [{ label: 'Third Place', count: stats.thirdPlaces, icon: '🥉' }] : []),
+      ],
+      matchWins: 0,
+      totalMatchesPlayed: 0,
+      gamesPlayed: allGames.filter((g) => this.getPlayerGameStats(userId, g.key).tournamentsPlayed > 0).map((g) => g.name),
+      breakdown: {
+        participationPts: stats.tournamentsPlayed,
+        championshipPts: stats.wins * 15,
+        runnerUpPts: stats.runnerUps * 10,
+        semiFinalPts: stats.thirdPlaces * 8,
+        matchWinPts: 0,
+        versatilityPts: 0,
+        matchPlayedPts: 0,
+      },
+    };
   }
 
   public getOrganizerStats(organizerId: string): {

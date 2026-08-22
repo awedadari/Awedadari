@@ -139,7 +139,7 @@ export const InboxModal: React.FC<InboxModalProps> = ({ isOpen, onClose, activeU
                 type="text"
                 value={telegramHandle}
                 onChange={(e) => setTelegramHandle(e.target.value)}
-                placeholder="Telegram Username (e.g. SeferGamer1)"
+                placeholder="Telegram Username (e.g. gamer_alex)"
                 className="w-full bg-slate-900 border border-slate-700 rounded-xl pl-7 pr-3 py-2 text-xs text-white placeholder-slate-500 focus:outline-none focus:border-sky-500"
               />
             </div>

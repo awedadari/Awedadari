@@ -180,6 +180,37 @@ export const PlayerDetailModal: React.FC<PlayerDetailModalProps> = ({
           </div>
         </div>
 
+        {/* Game-Specific Competitive Ratings */}
+        {(() => {
+          const gameStats = db.getPlayerAllGameStats(userId);
+          if (gameStats.length === 0) return null;
+          return (
+            <div className="space-y-2 pt-2 border-t border-slate-800">
+              <h3 className="text-xs font-extrabold text-slate-200 flex items-center gap-1.5 uppercase tracking-wider">
+                <Gamepad2 className="w-4 h-4 text-emerald-400" /> Competitive Game Ratings
+              </h3>
+              <div className="grid grid-cols-2 gap-2">
+                {gameStats.map((gs) => (
+                  <div
+                    key={gs.gameKey}
+                    className="p-2.5 bg-slate-850 border border-slate-800 rounded-xl flex items-center justify-between"
+                  >
+                    <div className="min-w-0 pr-1">
+                      <span className="font-bold text-white text-xs block truncate">{gs.gameName}</span>
+                      <span className="text-[10px] text-slate-400">
+                        {gs.tournamentsPlayed} {gs.tournamentsPlayed === 1 ? 'event' : 'events'}
+                      </span>
+                    </div>
+                    <span className="text-xs font-mono font-black text-emerald-400 bg-emerald-500/10 px-2 py-0.5 rounded-lg border border-emerald-500/20 shrink-0">
+                      {gs.rating} PTS
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          );
+        })()}
+
         {/* Attended Tournaments History */}
         <div className="space-y-2 pt-2 border-t border-slate-800">
           <h3 className="text-xs font-extrabold text-slate-200 flex items-center gap-1.5 uppercase tracking-wider">

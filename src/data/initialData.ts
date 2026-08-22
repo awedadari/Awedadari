@@ -75,6 +75,7 @@ export const INITIAL_USERS: User[] = [
 export const INITIAL_TOURNAMENTS: Tournament[] = [
   {
     id: 'tour_1',
+    tournamentCode: '0001',
     tournamentName: 'Nexus eFootball 1v1 Championship',
     game: 'eFootball 2026',
     image: 'https://images.unsplash.com/photo-1511512578047-dfb367046420?w=800&auto=format&fit=crop&q=80',
@@ -97,6 +98,7 @@ export const INITIAL_TOURNAMENTS: Tournament[] = [
   },
   {
     id: 'tour_2',
+    tournamentCode: '0002',
     tournamentName: 'Friday Night EA FC 26 Masters',
     game: 'EA SPORTS FC 26',
     image: 'https://images.unsplash.com/photo-1542751371-adc38448a05e?w=800&auto=format&fit=crop&q=80',
@@ -119,6 +121,7 @@ export const INITIAL_TOURNAMENTS: Tournament[] = [
   },
   {
     id: 'tour_3',
+    tournamentCode: '0003',
     tournamentName: 'PUBG Mobile Battle Royale Showdown',
     game: 'PUBG Mobile',
     image: 'https://images.unsplash.com/photo-1538481199705-c710c4e965fc?w=800&auto=format&fit=crop&q=80',
@@ -142,6 +145,7 @@ export const INITIAL_TOURNAMENTS: Tournament[] = [
   },
   {
     id: 'tour_4',
+    tournamentCode: '0004',
     tournamentName: 'Iron Fist Tekken 8 Showdown',
     game: 'Tekken 8',
     image: 'https://images.unsplash.com/photo-1550745165-9bc0b252726f?w=800&auto=format&fit=crop&q=80',
@@ -164,6 +168,7 @@ export const INITIAL_TOURNAMENTS: Tournament[] = [
   },
   {
     id: 'tour_5',
+    tournamentCode: '0005',
     tournamentName: 'Weekend eFootball Sprint #12',
     game: 'eFootball',
     image: 'https://images.unsplash.com/photo-1511512578047-dfb367046420?w=800&auto=format&fit=crop&q=80',

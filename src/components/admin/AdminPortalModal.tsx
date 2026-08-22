@@ -238,9 +238,12 @@ export const AdminPortalModal: React.FC<AdminPortalModalProps> = ({ isOpen, onCl
   };
 
   const handleSetUserRole = async (user: User, targetRole: UserRole) => {
-    await db.updateUser({ id: user.id, role: targetRole });
     if (targetRole === 'ORGANIZER') {
-      await db.addApprovedOrganizerId(user.telegramUserId);
+      await db.adminGrantOrganizer(user.id);
+    } else if (user.role === 'ORGANIZER' && targetRole === 'PLAYER') {
+      await db.adminRevokeOrganizer(user.id);
+    } else {
+      await db.updateUser({ id: user.id, role: targetRole });
     }
     setUserActionMsg(`Role for ${user.name} changed to ${targetRole}.`);
     setTimeout(() => setUserActionMsg(''), 3000);

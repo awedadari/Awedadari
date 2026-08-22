@@ -1,6 +1,10 @@
 import React, { useState } from 'react';
 import { db } from '../services/db';
-import { telegramService } from '../services/telegramService';
+import {
+  telegramService,
+  generateHomeMiniAppDeepLink,
+  generateTournamentsMiniAppDeepLink,
+} from '../services/telegramService';
 import { User, TelegramUser } from '../types';
 import {
   Send,
@@ -33,6 +37,8 @@ export const TelegramBotModal: React.FC<TelegramBotModalProps> = ({
 }) => {
   const [copiedLink, setCopiedLink] = useState(false);
   const [copiedBotCmd, setCopiedBotCmd] = useState(false);
+  const [copiedHomeLink, setCopiedHomeLink] = useState(false);
+  const [copiedTournamentsLink, setCopiedTournamentsLink] = useState(false);
   const [botUsername, setBotUsername] = useState('Awedadari_bot');
   const [newOrganizerId, setNewOrganizerId] = useState('');
   const [organizerActionMsg, setOrganizerActionMsg] = useState('');
@@ -50,6 +56,22 @@ export const TelegramBotModal: React.FC<TelegramBotModalProps> = ({
   const currentAppUrl = typeof window !== 'undefined' ? window.location.href : 'https://ai.studio/build';
   const approvedIds = db.getApprovedOrganizerIds();
   const isCurrentApproved = db.isApprovedOrganizer(activeUser.telegramUserId);
+
+  const handleCopyHomeLink = () => {
+    const link = generateHomeMiniAppDeepLink(botUsername);
+    navigator.clipboard.writeText(link);
+    setCopiedHomeLink(true);
+    telegramService.triggerHaptic('success');
+    setTimeout(() => setCopiedHomeLink(false), 2500);
+  };
+
+  const handleCopyTournamentsLink = () => {
+    const link = generateTournamentsMiniAppDeepLink(botUsername);
+    navigator.clipboard.writeText(link);
+    setCopiedTournamentsLink(true);
+    telegramService.triggerHaptic('success');
+    setTimeout(() => setCopiedTournamentsLink(false), 2500);
+  };
 
   const handleCopyLink = () => {
     navigator.clipboard.writeText(currentAppUrl);
@@ -233,6 +255,62 @@ export const TelegramBotModal: React.FC<TelegramBotModalProps> = ({
                 <p className="text-slate-400">
                   Open your bot chat in Telegram and tap the <strong>Menu Button</strong> on the bottom left corner. The Mini App opens instantly with automatic Telegram identity retrieval!
                 </p>
+              </div>
+
+              <div className="p-2.5 bg-slate-900 rounded-xl border border-sky-500/30 space-y-2">
+                <div className="flex items-center justify-between">
+                  <span className="font-bold text-sky-300 block">Direct Telegram Deep Links for Posts</span>
+                  <span className="text-[9px] bg-sky-500/20 text-sky-300 px-1.5 py-0.5 rounded font-mono">startapp</span>
+                </div>
+                <p className="text-slate-400 text-[10px]">
+                  Share these links in Telegram channels, groups, and chats to open specific tabs directly:
+                </p>
+
+                {/* Home Deep Link */}
+                <div className="space-y-1 pt-1">
+                  <div className="flex items-center justify-between text-[10px] text-slate-300">
+                    <span className="font-bold">HOME Tab</span>
+                    <code className="text-amber-400 font-mono text-[9px]">startapp=home</code>
+                  </div>
+                  <div className="flex items-center gap-1.5">
+                    <input
+                      type="text"
+                      readOnly
+                      value={`https://t.me/${botUsername}?startapp=home`}
+                      className="flex-1 bg-slate-950 border border-slate-750 rounded-lg px-2.5 py-1 font-mono text-[10px] text-slate-300 truncate"
+                    />
+                    <button
+                      onClick={handleCopyHomeLink}
+                      className="px-2.5 py-1 bg-slate-800 hover:bg-slate-750 text-white font-bold rounded-lg text-[10px] flex items-center gap-1 shrink-0 border border-slate-700"
+                    >
+                      <Copy className="w-3 h-3" />
+                      {copiedHomeLink ? 'Copied' : 'Copy'}
+                    </button>
+                  </div>
+                </div>
+
+                {/* Tournaments Deep Link */}
+                <div className="space-y-1 pt-1">
+                  <div className="flex items-center justify-between text-[10px] text-slate-300">
+                    <span className="font-bold">TOURNAMENTS Tab</span>
+                    <code className="text-amber-400 font-mono text-[9px]">startapp=tournaments</code>
+                  </div>
+                  <div className="flex items-center gap-1.5">
+                    <input
+                      type="text"
+                      readOnly
+                      value={`https://t.me/${botUsername}?startapp=tournaments`}
+                      className="flex-1 bg-slate-950 border border-slate-750 rounded-lg px-2.5 py-1 font-mono text-[10px] text-slate-300 truncate"
+                    />
+                    <button
+                      onClick={handleCopyTournamentsLink}
+                      className="px-2.5 py-1 bg-slate-800 hover:bg-slate-750 text-white font-bold rounded-lg text-[10px] flex items-center gap-1 shrink-0 border border-slate-700"
+                    >
+                      <Copy className="w-3 h-3" />
+                      {copiedTournamentsLink ? 'Copied' : 'Copy'}
+                    </button>
+                  </div>
+                </div>
               </div>
             </div>
           </div>

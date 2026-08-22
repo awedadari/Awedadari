@@ -49,6 +49,20 @@ export const PlayerTournamentCenter: React.FC<PlayerTournamentCenterProps> = ({ 
     }
   }, [initialTournament]);
 
+  // Subscribe to scoped tournament data (players, matches, groups, sessions, scores)
+  React.useEffect(() => {
+    if (activeTournament) {
+      db.subscribeToTournament(activeTournament.id);
+    }
+  }, [activeTournament?.id]);
+
+  // Load completed tournaments on-demand when user selects Finished or ALL status filter
+  React.useEffect(() => {
+    if (selectedStatus === 'Finished' || selectedStatus === 'Completed' || selectedStatus === 'ALL') {
+      db.loadCompletedTournaments();
+    }
+  }, [selectedStatus]);
+
   React.useEffect(() => {
     const unsub = db.subscribe(() => {
       setTick((t) => t + 1);
@@ -100,7 +114,8 @@ export const PlayerTournamentCenter: React.FC<PlayerTournamentCenterProps> = ({ 
       const matchGame = t.game.toLowerCase().includes(q);
       const matchVenue = (t.venueName || '').toLowerCase().includes(q);
       const matchLoc = (t.venueLocation || '').toLowerCase().includes(q);
-      if (!matchName && !matchGame && !matchVenue && !matchLoc) return false;
+      const matchCode = t.tournamentCode ? t.tournamentCode.toLowerCase().includes(q) || `#${t.tournamentCode}`.toLowerCase().includes(q) : false;
+      if (!matchName && !matchGame && !matchVenue && !matchLoc && !matchCode) return false;
     }
     return true;
   });
@@ -243,7 +258,7 @@ export const PlayerTournamentCenter: React.FC<PlayerTournamentCenterProps> = ({ 
             type="text"
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
-            placeholder="Search tournament name..."
+            placeholder="Search name, game, or code (e.g. 0001)..."
             className="w-full bg-slate-850 border border-slate-750 rounded-2xl pl-9 pr-3 py-1.5 text-xs text-slate-100 placeholder:text-slate-500 focus:outline-hidden focus:border-amber-400 transition-colors font-medium"
           />
           {searchQuery && (
@@ -360,7 +375,14 @@ export const PlayerTournamentCenter: React.FC<PlayerTournamentCenterProps> = ({ 
 
                   <div className="p-4 flex-1 flex flex-col justify-between space-y-3">
                     <div>
-                      <h3 className="font-extrabold text-slate-100 text-sm leading-tight">{t.tournamentName}</h3>
+                      <div className="flex items-center justify-between gap-2">
+                        <h3 className="font-extrabold text-slate-100 text-sm leading-tight">{t.tournamentName}</h3>
+                        {t.tournamentCode && (
+                          <span className="font-mono text-[10px] font-black text-amber-400 bg-amber-500/10 px-2 py-0.5 rounded-md border border-amber-500/20 shrink-0">
+                            #{t.tournamentCode}
+                          </span>
+                        )}
+                      </div>
                       <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5 mt-1.5 text-xs text-slate-400">
                         <span className="flex items-center gap-1">
                           <Calendar className="w-3.5 h-3.5 text-sky-400" />

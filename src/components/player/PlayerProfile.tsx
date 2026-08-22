@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { db } from '../../services/db';
 import { User, Tournament, Match } from '../../types';
 import {
@@ -29,6 +29,13 @@ interface PlayerProfileProps {
 }
 
 export const PlayerProfile: React.FC<PlayerProfileProps> = ({ user }) => {
+  const [, setTick] = useState(0);
+  useEffect(() => {
+    return db.subscribe(() => {
+      setTick((t) => t + 1);
+    });
+  }, []);
+
   const [gamertag, setGamertag] = useState(user.gamertag || '');
   const [phoneNumber, setPhoneNumber] = useState(user.phoneNumber || '');
   const [saved, setSaved] = useState(false);
@@ -45,9 +52,20 @@ export const PlayerProfile: React.FC<PlayerProfileProps> = ({ user }) => {
   const [showOrgReqModal, setShowOrgReqModal] = useState(false);
   const [orgReason, setOrgReason] = useState('');
   const [orgReqSubmittedMsg, setOrgReqSubmittedMsg] = useState('');
+  const [isSubmittingOrgReq, setIsSubmittingOrgReq] = useState(false);
 
   // Selected Tournament History Modal State (Requirement 3)
   const [selectedTournamentHistory, setSelectedTournamentHistory] = useState<Tournament | null>(null);
+
+  React.useEffect(() => {
+    db.loadCompletedTournaments();
+  }, []);
+
+  React.useEffect(() => {
+    if (selectedTournamentHistory) {
+      db.subscribeToTournament(selectedTournamentHistory.id);
+    }
+  }, [selectedTournamentHistory?.id]);
 
   const userTournaments = db
     .getTournaments()
@@ -60,7 +78,8 @@ export const PlayerProfile: React.FC<PlayerProfileProps> = ({ user }) => {
     });
 
   const orgRequests = db.getOrganizerRequests();
-  const userOrgReq = orgRequests.find((r) => r.userId === user.id);
+  const userOrgReq = orgRequests.find((r) => r.userId === user.id || r.telegramUserId === (user.telegramUserId || '').replace(/^tg_/, ''));
+  const isApproved = db.isApprovedOrganizer(user.telegramUserId || user.id) || user.organizerRequestStatus === 'approved';
 
   const handleSaveProfile = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -96,11 +115,18 @@ export const PlayerProfile: React.FC<PlayerProfileProps> = ({ user }) => {
 
   const handleSubmitOrgRequest = async (e: React.FormEvent) => {
     e.preventDefault();
-    await db.submitOrganizerRequest(user.id, orgReason.trim());
-    setOrgReqSubmittedMsg('Your organizer request has been sent to the administrator for review.');
-    setShowOrgReqModal(false);
-    setOrgReason('');
-    setTimeout(() => setOrgReqSubmittedMsg(''), 5000);
+    setIsSubmittingOrgReq(true);
+    try {
+      await db.submitOrganizerRequest(user.id, orgReason.trim());
+      setOrgReqSubmittedMsg('Your organizer request has been sent to the administrator for review.');
+      setShowOrgReqModal(false);
+      setOrgReason('');
+    } catch (err: any) {
+      alert('Failed to submit organizer request. Please try again.');
+    } finally {
+      setIsSubmittingOrgReq(false);
+      setTimeout(() => setOrgReqSubmittedMsg(''), 6000);
+    }
   };
 
   const handleTogglePerspectiveRole = async () => {
@@ -191,7 +217,7 @@ export const PlayerProfile: React.FC<PlayerProfileProps> = ({ user }) => {
         </div>
       </div>
 
-      {/* REQUEST ORGANIZER PRIVILEGES SECTION */}
+      {/* REQUEST ORGANIZER PRIVILEGES / ACCESS STATUS SECTION */}
       {user.role === 'PLAYER' && (
         <div className="bg-slate-850 border border-slate-750 rounded-2xl p-4 space-y-3">
           <div className="flex items-center justify-between">
@@ -200,19 +226,17 @@ export const PlayerProfile: React.FC<PlayerProfileProps> = ({ user }) => {
               Organizer Access Status
             </h3>
 
-            {userOrgReq?.status === 'pending' && (
-              <span className="px-2.5 py-0.5 bg-amber-500/20 text-amber-300 border border-amber-500/30 rounded-full text-[10px] font-bold flex items-center gap-1">
-                <Clock className="w-3 h-3 animate-pulse" />
-                Request Pending Admin Review
-              </span>
-            )}
-
-            {userOrgReq?.status === 'approved' && (
+            {isApproved ? (
               <span className="px-2.5 py-0.5 bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 rounded-full text-[10px] font-bold flex items-center gap-1">
                 <CheckCircle2 className="w-3 h-3" />
                 Approved by Admin
               </span>
-            )}
+            ) : userOrgReq?.status === 'pending' ? (
+              <span className="px-2.5 py-0.5 bg-amber-500/20 text-amber-300 border border-amber-500/30 rounded-full text-[10px] font-bold flex items-center gap-1">
+                <Clock className="w-3 h-3 animate-pulse" />
+                Request Pending Admin Review
+              </span>
+            ) : null}
           </div>
 
           {orgReqSubmittedMsg && (
@@ -221,24 +245,41 @@ export const PlayerProfile: React.FC<PlayerProfileProps> = ({ user }) => {
             </div>
           )}
 
-          <p className="text-xs text-slate-400 leading-relaxed">
-            Want to host tournaments, manage brackets, and review player payments? Request organizer privileges from the app owner.
-          </p>
-
-          {!userOrgReq || userOrgReq.status === 'rejected' ? (
-            <button
-              onClick={() => setShowOrgReqModal(true)}
-              className="w-full py-2.5 bg-amber-500 hover:bg-amber-400 text-slate-950 font-extrabold text-xs rounded-xl flex items-center justify-center gap-2 shadow-md transition-all active:scale-98"
-            >
-              <ShieldCheck className="w-4 h-4" />
-              Request Organizer Privileges
-            </button>
-          ) : userOrgReq.status === 'pending' ? (
-            <div className="p-3 bg-slate-900 border border-slate-800 rounded-xl text-xs text-amber-300 flex items-center gap-2">
-              <Clock className="w-4 h-4 shrink-0 text-amber-400" />
-              <span>Your request is under review by the administrator. Check back soon.</span>
+          {isApproved ? (
+            <div className="space-y-2">
+              <p className="text-xs text-slate-400 leading-relaxed">
+                You have approved Organizer privileges. You are currently viewing the app in Player perspective.
+              </p>
+              <button
+                onClick={handleTogglePerspectiveRole}
+                className="w-full py-2.5 bg-gradient-to-r from-amber-500 to-amber-600 hover:from-amber-400 hover:to-amber-500 text-slate-950 font-extrabold text-xs rounded-xl flex items-center justify-center gap-2 shadow-md transition-all active:scale-98"
+              >
+                <RefreshCw className="w-4 h-4" />
+                Switch to Organizer Perspective
+              </button>
             </div>
-          ) : null}
+          ) : (
+            <>
+              <p className="text-xs text-slate-400 leading-relaxed">
+                Want to host tournaments, manage brackets, and review player payments? Request organizer privileges from the app owner.
+              </p>
+
+              {!userOrgReq || userOrgReq.status === 'rejected' ? (
+                <button
+                  onClick={() => setShowOrgReqModal(true)}
+                  className="w-full py-2.5 bg-amber-500 hover:bg-amber-400 text-slate-950 font-extrabold text-xs rounded-xl flex items-center justify-center gap-2 shadow-md transition-all active:scale-98"
+                >
+                  <ShieldCheck className="w-4 h-4" />
+                  Request Organizer Privileges
+                </button>
+              ) : userOrgReq.status === 'pending' ? (
+                <div className="p-3 bg-slate-900 border border-slate-800 rounded-xl text-xs text-amber-300 flex items-center gap-2">
+                  <Clock className="w-4 h-4 shrink-0 text-amber-400" />
+                  <span>Your request is under review by the administrator. Check back soon.</span>
+                </div>
+              ) : null}
+            </>
+          )}
         </div>
       )}
 
@@ -296,6 +337,46 @@ export const PlayerProfile: React.FC<PlayerProfileProps> = ({ user }) => {
           </button>
         </form>
       </div>
+
+      {/* GAME-SPECIFIC COMPETITIVE RATINGS CARD */}
+      {(() => {
+        const gameStats = db.getPlayerAllGameStats(user.id);
+        if (gameStats.length === 0) return null;
+        return (
+          <div className="bg-slate-850 border border-slate-750 rounded-2xl p-4 space-y-3">
+            <div className="flex items-center justify-between">
+              <h3 className="text-xs font-bold text-slate-300 uppercase tracking-wider flex items-center gap-2">
+                <Gamepad2 className="w-4 h-4 text-emerald-400" />
+                My Game Ratings & Rankings
+              </h3>
+              <span className="text-[10px] text-emerald-400 font-mono font-bold">1000 Baseline</span>
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+              {gameStats.map((gs) => (
+                <div
+                  key={gs.gameKey}
+                  className="p-3 bg-slate-900 border border-slate-750 rounded-xl flex items-center justify-between shadow-xs"
+                >
+                  <div className="min-w-0 pr-2">
+                    <span className="font-extrabold text-white text-xs block truncate">{gs.gameName}</span>
+                    <div className="text-[10px] text-slate-400 flex items-center gap-2 mt-0.5">
+                      <span>🏆 {gs.wins} Wins</span>
+                      <span>•</span>
+                      <span>{gs.tournamentsPlayed} Events</span>
+                      <span>•</span>
+                      <span>Best: {gs.bestFinishLabel}</span>
+                    </div>
+                  </div>
+                  <span className="text-xs font-mono font-black text-emerald-400 bg-emerald-500/10 px-2.5 py-1 rounded-xl border border-emerald-500/20 shrink-0">
+                    {gs.rating} PTS
+                  </span>
+                </div>
+              ))}
+            </div>
+          </div>
+        );
+      })()}
 
       {/* Requirement 3: Clickable "My Tournaments" History Section */}
       <div className="bg-slate-850 border border-slate-750 rounded-2xl p-4 space-y-3">
@@ -563,9 +644,17 @@ export const PlayerProfile: React.FC<PlayerProfileProps> = ({ user }) => {
                 </button>
                 <button
                   type="submit"
-                  className="px-4 py-2 bg-amber-500 hover:bg-amber-400 text-slate-950 font-extrabold text-xs rounded-xl shadow-md"
+                  disabled={isSubmittingOrgReq}
+                  className="px-4 py-2 bg-amber-500 hover:bg-amber-400 disabled:opacity-50 text-slate-950 font-extrabold text-xs rounded-xl shadow-md flex items-center gap-1.5"
                 >
-                  Submit Request
+                  {isSubmittingOrgReq ? (
+                    <>
+                      <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                      Submitting...
+                    </>
+                  ) : (
+                    'Submit Request'
+                  )}
                 </button>
               </div>
             </form>

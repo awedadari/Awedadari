@@ -1,7 +1,7 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { Send, ExternalLink, ShieldCheck, AlertTriangle } from 'lucide-react';
 import { useDbStore } from './hooks/useDbStore';
-import { NavTab, Tournament } from './types';
+import { NavTab, Tournament, UserRole } from './types';
 import { db } from './services/db';
 import { Header } from './components/Header';
 import { BottomNav } from './components/BottomNav';
@@ -34,6 +34,36 @@ export default function App() {
   const [isInboxOpen, setIsInboxOpen] = useState(false);
   const [selectedTournamentForOverview, setSelectedTournamentForOverview] = useState<Tournament | null>(null);
   const [handledDeepLink, setHandledDeepLink] = useState(false);
+  const prevRoleRef = useRef<UserRole | null>(null);
+
+  // Synchronize role-gated listeners when active user or role changes
+  useEffect(() => {
+    if (activeUser) {
+      db.syncRoleListeners(activeUser);
+    }
+  }, [activeUser?.id, activeUser?.role]);
+
+  // Synchronize scoped tournament subscription when selectedTournamentForOverview changes
+  useEffect(() => {
+    if (selectedTournamentForOverview) {
+      db.subscribeToTournament(selectedTournamentForOverview.id);
+    }
+  }, [selectedTournamentForOverview?.id]);
+
+  // Reset stale navigation and tournament selection state when role changes between PLAYER and ORGANIZER
+  useEffect(() => {
+    if (!activeUser) return;
+    if (prevRoleRef.current && prevRoleRef.current !== activeUser.role) {
+      setSelectedTournamentForOverview(null);
+      setOrganizerPanelSubTab('tournaments');
+      if (activeUser.role === 'ORGANIZER' && activeTab === 'tournaments') {
+        setActiveTab('home');
+      } else if (activeUser.role === 'PLAYER' && activeTab === 'organizer_panel') {
+        setActiveTab('home');
+      }
+    }
+    prevRoleRef.current = activeUser.role;
+  }, [activeUser?.role, activeTab]);
 
   const isInsideTelegram = telegramService.isInsideTelegram();
 
@@ -93,7 +123,7 @@ export default function App() {
       });
   };
 
-  // Handle Telegram Direct Mini App startapp deep links (e.g. startapp=tour_1786298912734)
+  // Handle Telegram Direct Mini App startapp deep links (e.g. startapp=home, startapp=tournaments, startapp=tour_1786298912734)
   useEffect(() => {
     if (handledDeepLink) return;
 
@@ -103,13 +133,39 @@ export default function App() {
       return;
     }
 
+    const cleanParam = decodeURIComponent(startParam).trim().toLowerCase();
+
+    // 1. HOME Deep Link: https://t.me/<BOT_USERNAME>?startapp=home
+    if (cleanParam === 'home') {
+      setSelectedTournamentForOverview(null);
+      setActiveTab('home');
+      setHandledDeepLink(true);
+      return;
+    }
+
+    // 2. TOURNAMENTS Deep Link: https://t.me/<BOT_USERNAME>?startapp=tournaments
+    if (
+      cleanParam === 'tournaments' ||
+      cleanParam === 'tournament' ||
+      cleanParam === 'tournament_center' ||
+      cleanParam === 'tours'
+    ) {
+      setSelectedTournamentForOverview(null);
+      setActiveTab('tournaments');
+      setHandledDeepLink(true);
+      return;
+    }
+
+    // 3. Existing Tournament Deep Link: https://t.me/<BOT_USERNAME>?startapp=<tournament_id_or_code>
     const foundTour = db.getTournamentByStartParam(startParam);
     if (foundTour) {
       setSelectedTournamentForOverview(foundTour);
       setActiveTab('tournaments');
       setHandledDeepLink(true);
     } else if (!loading && (tournaments.length > 0 || db.getTournaments().length > 0)) {
-      // Data finished loading and tournament list is populated, but requested tournament was not found - fallback gracefully
+      // Data finished loading and tournament list is populated, but requested tournament was not found or param is unknown
+      // Fail safely to standard Mini App navigation without throwing errors
+      setSelectedTournamentForOverview(null);
       setHandledDeepLink(true);
     }
   }, [loading, tournaments, handledDeepLink]);
@@ -218,11 +274,6 @@ export default function App() {
   // If role is switched from Organizer to Player while on 'organizer_panel', fallback to 'home'
   if (activeUser.role === 'PLAYER' && activeTab === 'organizer_panel') {
     setActiveTab('home');
-  }
-
-  // If role is ORGANIZER and activeTab is 'tournaments', redirect to 'organizer_panel' unless viewing a specific tournament overview
-  if (activeUser.role === 'ORGANIZER' && activeTab === 'tournaments' && !selectedTournamentForOverview) {
-    setActiveTab('organizer_panel');
   }
 
   return (
