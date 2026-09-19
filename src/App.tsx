@@ -8,6 +8,7 @@ import { BottomNav } from './components/BottomNav';
 import { TelegramBotModal } from './components/TelegramBotModal';
 import { AdminPortalModal } from './components/admin/AdminPortalModal';
 import { telegramService, TELEGRAM_BOT_DEFAULT } from './services/telegramService';
+import { WebAuthScreen } from './components/auth/WebAuthScreen';
 
 // Player Views
 import { PlayerHome } from './components/player/PlayerHome';
@@ -75,7 +76,7 @@ export default function App() {
   // Cryptographically authenticate when opened inside Telegram WebApp
   useEffect(() => {
     if (!isInsideTelegram) {
-      setAuthStatus('AUTH_ERROR');
+      setAuthStatus('AUTHENTICATED');
       return;
     }
 
@@ -162,11 +163,18 @@ export default function App() {
       setSelectedTournamentForOverview(foundTour);
       setActiveTab('tournaments');
       setHandledDeepLink(true);
-    } else if (!loading && (tournaments.length > 0 || db.getTournaments().length > 0)) {
-      // Data finished loading and tournament list is populated, but requested tournament was not found or param is unknown
-      // Fail safely to standard Mini App navigation without throwing errors
-      setSelectedTournamentForOverview(null);
-      setHandledDeepLink(true);
+    } else {
+      db.fetchTournamentByStartParam(startParam).then((asyncTour) => {
+        if (asyncTour) {
+          setSelectedTournamentForOverview(asyncTour);
+          setActiveTab('tournaments');
+        } else if (!loading) {
+          setSelectedTournamentForOverview(null);
+        }
+        setHandledDeepLink(true);
+      }).catch(() => {
+        setHandledDeepLink(true);
+      });
     }
   }, [loading, tournaments, handledDeepLink]);
 
@@ -188,34 +196,16 @@ export default function App() {
     telegramService.triggerHaptic('warning');
   };
 
-  // 1. Outside Telegram Guard
-  if (!isInsideTelegram) {
-    return (
-      <div className="min-h-screen bg-slate-950 text-slate-100 font-sans antialiased selection:bg-sky-500 selection:text-white flex items-center justify-center p-4">
-        <div className="w-full max-w-sm bg-slate-900 border border-slate-800 rounded-3xl p-6 text-center space-y-5 shadow-2xl">
-          <div className="w-16 h-16 bg-sky-500/20 text-sky-400 rounded-2xl flex items-center justify-center mx-auto border border-sky-500/30">
-            <Send className="w-8 h-8" />
-          </div>
-          <div className="space-y-2">
-            <h1 className="text-lg font-bold text-slate-100">Telegram Mini App</h1>
-            <p className="text-sm text-slate-400 leading-relaxed">
-              This app is designed to be used inside Telegram.
-              <br />
-              Please open it through the Awedadari Telegram Mini App.
-            </p>
-          </div>
-          <a
-            href={`https://t.me/${TELEGRAM_BOT_DEFAULT.botUsername}`}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="inline-flex items-center justify-center gap-2 w-full py-3 px-4 bg-sky-500 hover:bg-sky-400 text-slate-950 font-extrabold rounded-2xl transition-all shadow-lg text-sm"
-          >
-            <span>Open in Telegram</span>
-            <ExternalLink className="w-4 h-4" />
-          </a>
+  // 1. Outside Telegram Authentication: Render WebAuthScreen if no active user session
+  if (!isInsideTelegram && !activeUser) {
+    if (loading) {
+      return (
+        <div className="min-h-screen bg-slate-950 text-slate-100 flex items-center justify-center p-4">
+          <div className="w-8 h-8 border-2 border-sky-400 border-t-transparent rounded-full animate-spin" />
         </div>
-      </div>
-    );
+      );
+    }
+    return <WebAuthScreen onAuthSuccess={() => setActiveTab('home')} />;
   }
 
   // 2. Cryptographic Authentication In-Progress State (Neutral, no mock identity)

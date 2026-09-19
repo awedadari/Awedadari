@@ -3,7 +3,7 @@ import express from 'express';
 import path from 'path';
 import fs from 'fs';
 import crypto from 'crypto';
-import { initializeApp, getApps } from 'firebase-admin/app';
+import { initializeApp, getApps, cert, applicationDefault } from 'firebase-admin/app';
 import { getAuth } from 'firebase-admin/auth';
 import { getFirestore } from 'firebase-admin/firestore';
 import { createServer as createViteServer } from 'vite';
@@ -23,9 +23,30 @@ if (fs.existsSync(firebaseConfigPath)) {
 
 function ensureFirebaseAdmin() {
   if (getApps().length === 0) {
-    initializeApp({
-      projectId: firebaseConfig.projectId,
-    });
+    let credential;
+    if (process.env.FIREBASE_SERVICE_ACCOUNT_KEY) {
+      try {
+        const sa = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT_KEY);
+        credential = cert(sa);
+      } catch (e) {
+        console.error('Failed to parse FIREBASE_SERVICE_ACCOUNT_KEY:', e);
+      }
+    }
+    const serviceAccountId =
+      process.env.FIREBASE_SERVICE_ACCOUNT_EMAIL ||
+      process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL;
+
+    try {
+      initializeApp({
+        projectId: firebaseConfig.projectId,
+        credential: credential || applicationDefault(),
+        ...(serviceAccountId ? { serviceAccountId } : {}),
+      });
+    } catch {
+      initializeApp({
+        projectId: firebaseConfig.projectId,
+      });
+    }
   }
 }
 
@@ -192,9 +213,26 @@ async function startServer() {
         customToken = await getAuth().createCustomToken(firebaseUid, {
           telegramUserId: cleanTgId,
         });
+        console.log('Firebase Custom Token minted successfully for Telegram UID:', firebaseUid);
       } catch (tokenErr: any) {
-        // Log error if Firebase custom token generation fails in sandbox
-        console.warn('Firebase Custom Token creation notice:', tokenErr?.message);
+        console.error('Firebase Custom Token creation failed:', {
+          uid: firebaseUid,
+          code: tokenErr?.code,
+          message: tokenErr?.message,
+        });
+        return res.status(500).json({
+          success: false,
+          error: 'Failed to mint Firebase Custom Token for Telegram user.',
+          details: tokenErr?.message,
+          code: tokenErr?.code || 'CUSTOM_TOKEN_CREATION_FAILED',
+        });
+      }
+
+      if (!customToken) {
+        return res.status(500).json({
+          success: false,
+          error: 'Firebase Custom Token was not generated.',
+        });
       }
 
       return res.json({
@@ -206,6 +244,73 @@ async function startServer() {
     } catch (err: any) {
       console.error('Error verifying Telegram initData:', err);
       return res.status(500).json({ success: false, error: 'Authentication processing failed' });
+    }
+  });
+
+  // Secure Telegram Web Login Endpoint (Telegram Login Widget verification)
+  app.post('/api/auth/telegram-web', async (req, res) => {
+    try {
+      const data = req.body || {};
+      const { hash, ...authData } = data;
+
+      if (!hash) {
+        return res.status(400).json({ success: false, error: 'Missing hash signature in Telegram web auth payload' });
+      }
+
+      const botToken = process.env.TELEGRAM_BOT_TOKEN;
+      if (!botToken) {
+        console.error('TELEGRAM_BOT_TOKEN is not configured on the server.');
+        return res.status(500).json({ success: false, error: 'Server authentication misconfigured: missing bot token' });
+      }
+
+      // Check auth_date
+      const authDate = parseInt(String(authData.auth_date || '0'), 10);
+      const now = Math.floor(Date.now() / 1000);
+      const MAX_AGE = 86400; // 24 hours max age
+      if (authDate > 0 && now - authDate > MAX_AGE) {
+        return res.status(401).json({ success: false, error: 'Telegram authentication session expired' });
+      }
+
+      // Telegram Login Widget verification: SHA256 of bot token is secret key
+      const secretKey = crypto.createHash('sha256').update(botToken).digest();
+      const sortedKeys = Object.keys(authData).sort();
+      const dataCheckArr: string[] = [];
+      for (const key of sortedKeys) {
+        dataCheckArr.push(`${key}=${authData[key]}`);
+      }
+      const dataCheckString = dataCheckArr.join('\n');
+      const calculatedHash = crypto.createHmac('sha256', secretKey).update(dataCheckString).digest('hex');
+
+      const hashBuf = Buffer.from(hash, 'hex');
+      const calcBuf = Buffer.from(calculatedHash, 'hex');
+
+      if (hashBuf.length !== calcBuf.length || !crypto.timingSafeEqual(hashBuf, calcBuf)) {
+        return res.status(401).json({ success: false, error: 'Invalid Telegram cryptographic signature' });
+      }
+
+      const cleanTgId = String(authData.id).replace(/^tg_/, '').trim();
+      const firebaseUid = `tg_${cleanTgId}`;
+
+      ensureFirebaseAdmin();
+      const customToken = await getAuth().createCustomToken(firebaseUid, {
+        telegramUserId: cleanTgId,
+      });
+
+      return res.json({
+        success: true,
+        customToken,
+        user: {
+          id: cleanTgId,
+          first_name: authData.first_name,
+          last_name: authData.last_name,
+          username: authData.username,
+          photo_url: authData.photo_url,
+        },
+        uid: firebaseUid,
+      });
+    } catch (err: any) {
+      console.error('Error verifying Telegram web auth:', err);
+      return res.status(500).json({ success: false, error: 'Telegram web authentication processing failed' });
     }
   });
 

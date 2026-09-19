@@ -164,6 +164,10 @@ service cloud.firestore {
             resource.data.isApproved == false ||
             !request.resource.data.diff(resource.data).affectedKeys().hasAny(['telebirrName', 'telebirrAccountName', 'telebirrNumber'])
           )
+        ) ||
+        (
+          // Allow transactional player count update during registration
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly(['registeredPlayersCount'])
         )
       );
       allow delete: if isAdmin() || (
@@ -183,7 +187,8 @@ service cloud.firestore {
           (
             !('paymentStatus' in request.resource.data.keys()) ||
             request.resource.data.paymentStatus == 'PENDING_APPROVAL' ||
-            request.resource.data.paymentStatus == 'UNPAID'
+            request.resource.data.paymentStatus == 'UNPAID' ||
+            request.resource.data.paymentStatus == 'CONFIRMED'
           ) &&
           (!('playerStatus' in request.resource.data.keys()) || request.resource.data.playerStatus == 'Registered') &&
           (!('status' in request.resource.data.keys()) || request.resource.data.status == 'Registered')
@@ -194,8 +199,21 @@ service cloud.firestore {
         isTournamentOrganizer(resource.data.tournamentId) ||
         (
           isUser(resource.data.userId) &&
-          // Player cannot modify payment status or check-in status directly
-          !request.resource.data.diff(resource.data).affectedKeys().hasAny(['paymentStatus', 'isCheckedIn', 'playerStatus', 'status'])
+          isUser(request.resource.data.userId) &&
+          request.resource.data.userId == resource.data.userId &&
+          request.resource.data.tournamentId == resource.data.tournamentId &&
+          (
+            // 1. Player cannot modify payment status or check-in status directly during general updates
+            !request.resource.data.diff(resource.data).affectedKeys().hasAny(['paymentStatus', 'isCheckedIn', 'playerStatus', 'status']) ||
+            // 2. Legitimate payment receipt submission transition: allow player to submit proof and set status to PENDING_APPROVAL
+            (
+              request.resource.data.paymentStatus == 'PENDING_APPROVAL' &&
+              resource.data.paymentStatus != 'PAID' &&
+              !request.resource.data.diff(resource.data).affectedKeys().hasAny(['isCheckedIn']) &&
+              (!('playerStatus' in request.resource.data.keys()) || request.resource.data.playerStatus == 'Registered') &&
+              (!('status' in request.resource.data.keys()) || request.resource.data.status == 'Registered')
+            )
+          )
         )
       );
       allow delete: if isAuthenticated() && (
@@ -279,6 +297,27 @@ service cloud.firestore {
     match /counters/{counterId} {
       allow read: if true;
       allow write: if isAuthenticated();
+    }
+
+    // 12. REGISTRATION CODES COLLECTION
+    match /registrationCodes/{codeId} {
+      allow read: if isAuthenticated();
+      allow create: if isAuthenticated() && (
+        isAdmin() ||
+        isTournamentOrganizer(request.resource.data.tournamentId)
+      );
+      allow update: if isAuthenticated() && (
+        isAdmin() ||
+        isTournamentOrganizer(resource.data.tournamentId) ||
+        (
+          resource.data.status == 'AVAILABLE' &&
+          request.resource.data.status == 'USED' &&
+          isUser(request.resource.data.usedBy)
+        )
+      );
+      allow delete: if isAdmin() || (
+        isAuthenticated() && isTournamentOrganizer(resource.data.tournamentId)
+      );
     }
   }
 }

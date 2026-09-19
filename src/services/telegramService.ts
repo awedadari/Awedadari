@@ -213,14 +213,18 @@ class TelegramService {
         if (result.customToken && !db.isFirebaseAdminAuthenticated()) {
           try {
             await signInWithCustomToken(auth, result.customToken);
-          } catch (signInErr) {
-            console.warn('signInWithCustomToken notice:', signInErr);
-            if (!auth.currentUser) {
-              await signInAnonymously(auth).catch(() => {});
-            }
+          } catch (signInErr: any) {
+            console.error('signInWithCustomToken failed:', signInErr);
+            return {
+              success: false,
+              error: `CUSTOM_TOKEN_SIGNIN_FAILED: ${signInErr?.message || 'Failed to authenticate with Firebase'}`,
+            };
           }
-        } else if (!auth.currentUser && !db.isFirebaseAdminAuthenticated()) {
-          await signInAnonymously(auth).catch(() => {});
+        } else if (!db.isFirebaseAdminAuthenticated()) {
+          return {
+            success: false,
+            error: 'MISSING_CUSTOM_TOKEN',
+          };
         }
 
         const verifiedTgUser: TelegramUser = result.user;

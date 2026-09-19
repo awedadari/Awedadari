@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { db } from '../../services/db';
 import { telegramService } from '../../services/telegramService';
 import { User, Tournament, TournamentStatus } from '../../types';
+import { PaginationControls } from '../common/PaginationControls';
 import { Trophy, Plus, Calendar, Clock, Users, Swords, Settings, Edit2, CheckCircle2, X, AlertCircle } from 'lucide-react';
 
 interface OrganizerTournamentCenterProps {
@@ -28,6 +29,14 @@ export const OrganizerTournamentCenter: React.FC<OrganizerTournamentCenterProps>
     db.updateTournamentStatus(id, status);
     showToast(`Status updated to "${status}"`);
   };
+
+  const [orgTourPage, setOrgTourPage] = useState(1);
+  const [orgTourPageSize, setOrgTourPageSize] = useState(10);
+
+  const paginatedTournaments = tournaments.slice(
+    (orgTourPage - 1) * orgTourPageSize,
+    orgTourPage * orgTourPageSize
+  );
 
   return (
     <div className="space-y-4 pb-24">
@@ -75,7 +84,7 @@ export const OrganizerTournamentCenter: React.FC<OrganizerTournamentCenterProps>
             </button>
           </div>
         ) : (
-          tournaments.map((t) => {
+          paginatedTournaments.map((t) => {
             const players = db.getTournamentPlayers(t.id);
             const matches = db.getMatches(t.id);
             const isCompleted = t.status === 'Completed' || t.status === 'Finished';
@@ -187,6 +196,18 @@ export const OrganizerTournamentCenter: React.FC<OrganizerTournamentCenterProps>
           })
         )}
       </div>
+
+      <PaginationControls
+        currentPage={orgTourPage}
+        totalItems={tournaments.length}
+        pageSize={orgTourPageSize}
+        onPageChange={setOrgTourPage}
+        onPageSizeChange={(size) => {
+          setOrgTourPageSize(size);
+          setOrgTourPage(1);
+        }}
+        itemLabel="tournaments"
+      />
 
       {/* START TOURNAMENT CONFIRMATION MODAL */}
       {startConfirmTour && (

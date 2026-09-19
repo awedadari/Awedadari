@@ -95,6 +95,8 @@ export const INITIAL_TOURNAMENTS: Tournament[] = [
     registrationFee: '100 ETB',
     telebirrNumber: '0911223344',
     telebirrAccountName: 'Nexus Gaming Arena',
+    youtubeVideoId: 'M7lc1UVf-VE',
+    youtubeStreamUrl: 'https://www.youtube.com/watch?v=M7lc1UVf-VE',
   },
   {
     id: 'tour_2',

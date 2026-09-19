@@ -1,7 +1,15 @@
 import React, { useState, useEffect } from 'react';
 import { db } from '../../services/db';
-import { useAdminSession, AdminLogoutReason, validateAdminSession } from '../../hooks/useAdminSession';
-import { User, UserRole, WithdrawalRequest } from '../../types';
+import {
+  useAdminSession,
+  AdminLogoutReason,
+  validateAdminSession,
+  getAdminSessionMetadata,
+  clearAdminSessionMetadata,
+} from '../../hooks/useAdminSession';
+import { useCursorPagination } from '../../hooks/useCursorPagination';
+import { User, UserRole, WithdrawalRequest, Tournament } from '../../types';
+import { PaginationControls } from '../common/PaginationControls';
 import {
   ShieldCheck,
   Lock,
@@ -67,8 +75,9 @@ export const AdminPortalModal: React.FC<AdminPortalModalProps> = ({ isOpen, onCl
         clearLogoutReason();
       } else {
         setIsAuthenticated(false);
-        if (fbUser && db.isFirebaseAdminAuthenticated()) {
-          db.logoutAdminWithFirebase();
+        // Clean up stale admin session metadata if expired, without disrupting public sessions
+        if (getAdminSessionMetadata()) {
+          clearAdminSessionMetadata();
         }
       }
     }
@@ -79,12 +88,49 @@ export const AdminPortalModal: React.FC<AdminPortalModalProps> = ({ isOpen, onCl
   const [activeTab, setActiveTab] = useState<'users' | 'organizers' | 'tournaments' | 'withdrawals' | 'registration_requests'>(
     'users'
   );
+  const [dbVersion, setDbVersion] = useState(0);
+
+  useEffect(() => {
+    return db.subscribe(() => {
+      setDbVersion((v) => v + 1);
+    });
+  }, []);
+
   const [searchTerm, setSearchTerm] = useState('');
   const [roleFilter, setRoleFilter] = useState<'ALL' | 'PLAYER' | 'ORGANIZER' | 'REFEREE' | 'ADMIN'>('ALL');
   const [tournamentSearchTerm, setTournamentSearchTerm] = useState('');
   const [previewScreenshotUrl, setPreviewScreenshotUrl] = useState<string | null>(null);
   const [regFilter, setRegFilter] = useState<'ALL' | 'PENDING_APPROVAL' | 'CONFIRMED' | 'REJECTED'>('PENDING_APPROVAL');
   const [regSearchTerm, setRegSearchTerm] = useState('');
+
+  // Pagination States
+  const [usersPage, setUsersPage] = useState(1);
+  const [usersPageSize, setUsersPageSize] = useState(10);
+
+  const [regPage, setRegPage] = useState(1);
+  const [regPageSize, setRegPageSize] = useState(10);
+
+  const [orgsPage, setOrgsPage] = useState(1);
+  const [orgsPageSize, setOrgsPageSize] = useState(10);
+
+  const [toursPage, setToursPage] = useState(1);
+  const [toursPageSize, setToursPageSize] = useState(10);
+
+  const [withdrawalsPage, setWithdrawalsPage] = useState(1);
+  const [withdrawalsPageSize, setWithdrawalsPageSize] = useState(10);
+
+  // Auto-reset page indices when search/filter inputs change
+  useEffect(() => {
+    setUsersPage(1);
+  }, [searchTerm, roleFilter]);
+
+  useEffect(() => {
+    setRegPage(1);
+  }, [regSearchTerm, regFilter]);
+
+  useEffect(() => {
+    setToursPage(1);
+  }, [tournamentSearchTerm]);
 
   // Add User Form State
   const [showAddUserModal, setShowAddUserModal] = useState(false);
@@ -158,24 +204,22 @@ export const AdminPortalModal: React.FC<AdminPortalModalProps> = ({ isOpen, onCl
     return true;
   };
 
-  if (!isOpen) return null;
-
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!adminEmailInput.trim() || !adminPasswordInput.trim()) {
-      setLoginError('Invalid email or password.');
+      setLoginError('Please enter both admin email and password.');
       return;
     }
     console.log('[ADMIN LOGIN] submit');
     setIsSubmittingLogin(true);
     setLoginError('');
     try {
-      const isValid = await db.loginAdminWithFirebase(adminEmailInput.trim(), adminPasswordInput);
+      const result = await db.loginAdminWithFirebase(adminEmailInput.trim(), adminPasswordInput);
       const fbUser = db.getAdminAuthUser();
       const isAdmin = db.isFirebaseAdminAuthenticated();
 
-      console.log('[ADMIN LOGIN] admin verification =', isAdmin);
-      if (isValid && fbUser && isAdmin) {
+      console.log('[ADMIN LOGIN] admin verification =', isAdmin, 'result success =', result.success);
+      if (result.success && fbUser && isAdmin) {
         console.log('[ADMIN LOGIN] UID =', fbUser.uid);
         console.log('[ADMIN LOGIN] creating session metadata');
         initSession(fbUser.uid);
@@ -186,16 +230,30 @@ export const AdminPortalModal: React.FC<AdminPortalModalProps> = ({ isOpen, onCl
         setLoginError('');
         setAdminPasswordInput('');
       } else {
-        console.log('[ADMIN LOGIN] login failed = invalid credentials or unauthorized');
+        console.error('[ADMIN LOGIN] login failed details:', {
+          errorCode: result.errorCode,
+          errorMessage: result.errorMessage,
+          providerIds: result.providerIds,
+          previousSessionPresent: result.previousSessionPresent,
+        });
         setIsAuthenticated(false);
-        setLoginError('Invalid email or password.');
-        await db.logoutAdminWithFirebase().catch(() => {});
+        if (result.errorCode === 'auth/unauthorized-admin') {
+          setLoginError('You are authenticated, but this account is not authorized for Admin Control Portal access.');
+        } else if (result.errorCode === 'auth/wrong-password' || result.errorCode === 'auth/invalid-credential' || result.errorCode === 'auth/user-not-found') {
+          setLoginError('Invalid email or password.');
+        } else if (result.errorMessage) {
+          setLoginError(result.errorMessage);
+        } else {
+          setLoginError('Admin authentication failed. Please check your credentials.');
+        }
       }
     } catch (err: any) {
-      console.error('[ADMIN LOGIN] login failed =', err?.message || err);
+      console.error('[ADMIN LOGIN] unexpected login exception:', {
+        errorCode: err?.code || 'unknown',
+        errorMessage: err?.message || String(err),
+      });
       setIsAuthenticated(false);
-      setLoginError('Invalid email or password.');
-      await db.logoutAdminWithFirebase().catch(() => {});
+      setLoginError('Admin authentication failed. Please check your credentials.');
     } finally {
       setIsSubmittingLogin(false);
     }
@@ -226,6 +284,9 @@ export const AdminPortalModal: React.FC<AdminPortalModalProps> = ({ isOpen, onCl
   const handleDeleteUser = async (user: User) => {
     if (window.confirm(`Are you sure you want to permanently delete user "${user.name}"?`)) {
       await db.deleteUser(user.id);
+      if (selectedUserForDetail?.id === user.id) {
+        setSelectedUserForDetail(null);
+      }
       setUserActionMsg(`User "${user.name}" removed from database.`);
       setTimeout(() => setUserActionMsg(''), 4000);
     }
@@ -306,6 +367,92 @@ export const AdminPortalModal: React.FC<AdminPortalModalProps> = ({ isOpen, onCl
     if (roleFilter === 'ALL') return matchesSearch;
     return matchesSearch && u.role === roleFilter;
   });
+
+  const paginatedUsersFallback = filteredUsers.slice(
+    (usersPage - 1) * usersPageSize,
+    usersPage * usersPageSize
+  );
+
+  const usersPagination = useCursorPagination<User>({
+    fetchPage: async (pageSize, lastDoc) => {
+      const res = await db.getPaginatedUsers({
+        pageSize,
+        lastDoc,
+        role: roleFilter,
+        searchTerm,
+      });
+      return {
+        items: res.users,
+        lastDoc: res.lastDoc,
+        hasMore: res.hasMore,
+        totalCount: res.totalCount,
+      };
+    },
+    pageSize: usersPageSize,
+    dependencies: [roleFilter, searchTerm, activeTab, isOpen, dbVersion],
+    enabled: isOpen && activeTab === 'users',
+  });
+
+  const paginatedApprovedOrgIds = approvedOrgIds.slice(
+    (orgsPage - 1) * orgsPageSize,
+    orgsPage * orgsPageSize
+  );
+
+  const filteredTournaments = tournaments.filter(
+    (t) =>
+      !tournamentSearchTerm ||
+      t.tournamentName.toLowerCase().includes(tournamentSearchTerm.toLowerCase()) ||
+      t.game.toLowerCase().includes(tournamentSearchTerm.toLowerCase()) ||
+      t.status.toLowerCase().includes(tournamentSearchTerm.toLowerCase())
+  );
+
+  const paginatedTournamentsFallback = filteredTournaments.slice(
+    (toursPage - 1) * toursPageSize,
+    toursPage * toursPageSize
+  );
+
+  const toursPagination = useCursorPagination<Tournament>({
+    fetchPage: async (pageSize, lastDoc) => {
+      const res = await db.getPaginatedTournaments({
+        pageSize,
+        lastDoc,
+        searchTerm: tournamentSearchTerm,
+      });
+      return {
+        items: res.tournaments,
+        lastDoc: res.lastDoc,
+        hasMore: res.hasMore,
+      };
+    },
+    pageSize: toursPageSize,
+    dependencies: [tournamentSearchTerm, activeTab, isOpen, dbVersion],
+    enabled: isOpen && activeTab === 'tournaments',
+  });
+
+  const allWithdrawals = db.getWithdrawalRequests();
+  const paginatedWithdrawalsFallback = allWithdrawals.slice(
+    (withdrawalsPage - 1) * withdrawalsPageSize,
+    withdrawalsPage * withdrawalsPageSize
+  );
+
+  const withdrawalsPagination = useCursorPagination<WithdrawalRequest>({
+    fetchPage: async (pageSize, lastDoc) => {
+      const res = await db.getPaginatedWithdrawalRequests({
+        pageSize,
+        lastDoc,
+      });
+      return {
+        items: res.requests,
+        lastDoc: res.lastDoc,
+        hasMore: res.hasMore,
+      };
+    },
+    pageSize: withdrawalsPageSize,
+    dependencies: [activeTab, isOpen, dbVersion],
+    enabled: isOpen && activeTab === 'withdrawals',
+  });
+
+  if (!isOpen) return null;
 
   return (
     <div className="fixed inset-0 z-50 bg-slate-950/80 backdrop-blur-md flex justify-center items-start p-3 sm:p-4 overflow-y-auto">
@@ -540,12 +687,16 @@ export const AdminPortalModal: React.FC<AdminPortalModalProps> = ({ isOpen, onCl
 
                 {/* Users List Grid */}
                 <div className="max-h-96 overflow-y-auto space-y-2 pr-1">
-                  {filteredUsers.length === 0 ? (
+                  {usersPagination.isLoading && usersPagination.items.length === 0 ? (
+                    <div className="p-8 text-center text-slate-400 text-xs bg-slate-850 rounded-2xl border border-slate-800 animate-pulse">
+                      Loading users from database...
+                    </div>
+                  ) : (usersPagination.items.length > 0 ? usersPagination.items : paginatedUsersFallback).length === 0 ? (
                     <div className="p-8 text-center text-slate-500 text-xs bg-slate-850 rounded-2xl border border-slate-800">
                       No users found matching filter.
                     </div>
                   ) : (
-                    filteredUsers.map((u) => (
+                    (usersPagination.items.length > 0 ? usersPagination.items : paginatedUsersFallback).map((u) => (
                       <div
                         key={u.id}
                         className="p-3 bg-slate-850 border border-slate-750 rounded-2xl flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 hover:border-slate-650 transition-colors"
@@ -612,6 +763,18 @@ export const AdminPortalModal: React.FC<AdminPortalModalProps> = ({ isOpen, onCl
                     ))
                   )}
                 </div>
+
+                <PaginationControls
+                  currentPage={usersPagination.currentPage}
+                  totalItems={usersPagination.totalItemsEstimate > 0 ? usersPagination.totalItemsEstimate : filteredUsers.length}
+                  pageSize={usersPagination.pageSize}
+                  onPageChange={(p) => usersPagination.goToPage(p)}
+                  onPageSizeChange={(size) => {
+                    setUsersPageSize(size);
+                    usersPagination.changePageSize(size);
+                  }}
+                  itemLabel="users"
+                />
               </div>
             )}
 
@@ -710,7 +873,7 @@ export const AdminPortalModal: React.FC<AdminPortalModalProps> = ({ isOpen, onCl
                     Currently Approved Telegram IDs ({approvedOrgIds.length})
                   </h4>
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                    {approvedOrgIds.map((id) => {
+                    {paginatedApprovedOrgIds.map((id) => {
                       const matchedUser = allUsers.find(
                         (u) => u.telegramUserId.replace(/^tg_/, '') === id
                       );
@@ -747,6 +910,18 @@ export const AdminPortalModal: React.FC<AdminPortalModalProps> = ({ isOpen, onCl
                       );
                     })}
                   </div>
+
+                  <PaginationControls
+                    currentPage={orgsPage}
+                    totalItems={approvedOrgIds.length}
+                    pageSize={orgsPageSize}
+                    onPageChange={setOrgsPage}
+                    onPageSizeChange={(size) => {
+                      setOrgsPageSize(size);
+                      setOrgsPage(1);
+                    }}
+                    itemLabel="organizers"
+                  />
                 </div>
               </div>
             )}
@@ -850,25 +1025,20 @@ export const AdminPortalModal: React.FC<AdminPortalModalProps> = ({ isOpen, onCl
                 {/* All System Tournaments */}
                 <div className="space-y-3">
                   <h3 className="font-bold text-white text-sm">
-                    All System Tournaments ({
-                      tournaments.filter((t) =>
-                        !tournamentSearchTerm ||
-                        t.tournamentName.toLowerCase().includes(tournamentSearchTerm.toLowerCase()) ||
-                        t.game.toLowerCase().includes(tournamentSearchTerm.toLowerCase()) ||
-                        t.status.toLowerCase().includes(tournamentSearchTerm.toLowerCase())
-                      ).length
-                    })
+                    All System Tournaments ({filteredTournaments.length})
                   </h3>
 
                   <div className="max-h-72 overflow-y-auto space-y-2 pr-1">
-                    {tournaments
-                      .filter((t) =>
-                        !tournamentSearchTerm ||
-                        t.tournamentName.toLowerCase().includes(tournamentSearchTerm.toLowerCase()) ||
-                        t.game.toLowerCase().includes(tournamentSearchTerm.toLowerCase()) ||
-                        t.status.toLowerCase().includes(tournamentSearchTerm.toLowerCase())
-                      )
-                      .map((t) => {
+                    {toursPagination.isLoading && toursPagination.items.length === 0 ? (
+                      <div className="p-6 text-center text-slate-400 text-xs bg-slate-850 rounded-2xl border border-slate-800 animate-pulse">
+                        Loading tournaments from database...
+                      </div>
+                    ) : (toursPagination.items.length > 0 ? toursPagination.items : paginatedTournamentsFallback).length === 0 ? (
+                      <div className="p-6 text-center text-slate-500 text-xs bg-slate-850 rounded-2xl border border-slate-800">
+                        No tournaments found.
+                      </div>
+                    ) : (
+                      (toursPagination.items.length > 0 ? toursPagination.items : paginatedTournamentsFallback).map((t) => {
                         const org = db.getUserById(t.organizerId);
                         return (
                           <div
@@ -906,8 +1076,21 @@ export const AdminPortalModal: React.FC<AdminPortalModalProps> = ({ isOpen, onCl
                             </button>
                           </div>
                         );
-                      })}
+                      })
+                    )}
                   </div>
+
+                  <PaginationControls
+                    currentPage={toursPagination.currentPage}
+                    totalItems={toursPagination.totalItemsEstimate > 0 ? toursPagination.totalItemsEstimate : filteredTournaments.length}
+                    pageSize={toursPagination.pageSize}
+                    onPageChange={(p) => toursPagination.goToPage(p)}
+                    onPageSizeChange={(size) => {
+                      setToursPageSize(size);
+                      toursPagination.changePageSize(size);
+                    }}
+                    itemLabel="tournaments"
+                  />
                 </div>
               </div>
             )}
@@ -927,7 +1110,7 @@ export const AdminPortalModal: React.FC<AdminPortalModalProps> = ({ isOpen, onCl
                     const fee = match ? parseFloat(match[1]) : 0;
                     totalCollected += fee * countedPlayers;
                   });
-                  const adminShare = Math.round(totalCollected * 0.10);
+                  const adminShare = Math.round(totalCollected * 0.03 * 100) / 100;
 
                   return (
                     <div className="grid grid-cols-2 gap-3 bg-slate-850 p-4 rounded-2xl border border-slate-750">
@@ -937,7 +1120,7 @@ export const AdminPortalModal: React.FC<AdminPortalModalProps> = ({ isOpen, onCl
                         <p className="text-[10px] text-slate-500 font-medium font-sans">Gross revenue across all tournaments</p>
                       </div>
                       <div className="space-y-1 border-l border-slate-750 pl-4">
-                        <span className="text-[11px] font-bold text-emerald-400 uppercase tracking-wider block">Admin Share (10%)</span>
+                        <span className="text-[11px] font-bold text-emerald-400 uppercase tracking-wider block">Admin Share (3%)</span>
                         <p className="text-xl font-black text-emerald-400">{adminShare.toLocaleString()} ETB</p>
                         <p className="text-[10px] text-emerald-500/80 font-medium font-sans">System platform revenue</p>
                       </div>
@@ -963,14 +1146,18 @@ export const AdminPortalModal: React.FC<AdminPortalModalProps> = ({ isOpen, onCl
                   </div>
                 </div>
 
-                {db.getWithdrawalRequests().length === 0 ? (
+                {withdrawalsPagination.isLoading && withdrawalsPagination.items.length === 0 ? (
+                  <div className="p-8 text-center text-slate-400 text-xs bg-slate-850/50 rounded-2xl border border-slate-800 animate-pulse">
+                    Loading withdrawal requests...
+                  </div>
+                ) : (withdrawalsPagination.items.length > 0 ? withdrawalsPagination.items : paginatedWithdrawalsFallback).length === 0 ? (
                   <div className="p-8 text-center bg-slate-850/50 rounded-2xl border border-slate-800">
                     <DollarSign className="w-8 h-8 text-slate-600 mx-auto mb-2" />
                     <p className="text-xs text-slate-400 font-medium">No withdrawal requests found.</p>
                   </div>
                 ) : (
                   <div className="space-y-3">
-                    {db.getWithdrawalRequests().map((req) => (
+                    {(withdrawalsPagination.items.length > 0 ? withdrawalsPagination.items : paginatedWithdrawalsFallback).map((req) => (
                       <div
                         key={req.id}
                         onClick={() => setSelectedWithdrawalRequestDetail(req)}
@@ -1017,6 +1204,18 @@ export const AdminPortalModal: React.FC<AdminPortalModalProps> = ({ isOpen, onCl
                         </div>
                       </div>
                     ))}
+
+                    <PaginationControls
+                      currentPage={withdrawalsPagination.currentPage}
+                      totalItems={withdrawalsPagination.totalItemsEstimate > 0 ? withdrawalsPagination.totalItemsEstimate : allWithdrawals.length}
+                      pageSize={withdrawalsPagination.pageSize}
+                      onPageChange={(p) => withdrawalsPagination.goToPage(p)}
+                      onPageSizeChange={(size) => {
+                        setWithdrawalsPageSize(size);
+                        withdrawalsPagination.changePageSize(size);
+                      }}
+                      itemLabel="withdrawals"
+                    />
                   </div>
                 )}
 
@@ -1034,7 +1233,7 @@ export const AdminPortalModal: React.FC<AdminPortalModalProps> = ({ isOpen, onCl
                           <th className="p-2.5 text-center">Entry Fee</th>
                           <th className="p-2.5 text-center">Registered Players</th>
                           <th className="p-2.5 text-right">Total Collected</th>
-                          <th className="p-2.5 text-right">Admin Share (10%)</th>
+                          <th className="p-2.5 text-right">Admin Share (3%)</th>
                           <th className="p-2.5 text-center">Status</th>
                         </tr>
                       </thead>
@@ -1051,7 +1250,7 @@ export const AdminPortalModal: React.FC<AdminPortalModalProps> = ({ isOpen, onCl
                             const match = (t.registrationFee || '').match(/(\d+(?:\.\d+)?)/);
                             const fee = match ? parseFloat(match[1]) : 0;
                             const tourTotalCollected = fee * countedPlayers;
-                            const tourAdminShare = Math.round(tourTotalCollected * 0.10);
+                            const tourAdminShare = Math.round(tourTotalCollected * 0.03 * 100) / 100;
 
                             return (
                               <tr key={t.id} className="hover:bg-slate-800/40">
@@ -1171,7 +1370,12 @@ export const AdminPortalModal: React.FC<AdminPortalModalProps> = ({ isOpen, onCl
                             );
                           }
 
-                          return filtered.map((req) => (
+                          const paginatedFiltered = filtered.slice(
+                            (regPage - 1) * regPageSize,
+                            regPage * regPageSize
+                          );
+
+                          return paginatedFiltered.map((req) => (
                             <tr key={`${req.tournament.id}-${req.playerRecord.userId}`} className="hover:bg-slate-800/40">
                               <td className="p-3 font-bold text-white flex items-center gap-2">
                                 <img
@@ -1240,6 +1444,7 @@ export const AdminPortalModal: React.FC<AdminPortalModalProps> = ({ isOpen, onCl
                                     onClick={async () => {
                                       await db.updatePaymentStatus(req.tournament.id, req.playerRecord.userId, 'CONFIRMED');
                                       setUserActionMsg(`Approved payment for ${req.userObj?.name || 'player'}`);
+                                      setTimeout(() => setUserActionMsg(''), 4000);
                                     }}
                                     disabled={req.playerRecord.paymentStatus === 'CONFIRMED'}
                                     className={`px-2.5 py-1 rounded-lg text-[10px] font-black transition-all ${
@@ -1254,6 +1459,7 @@ export const AdminPortalModal: React.FC<AdminPortalModalProps> = ({ isOpen, onCl
                                     onClick={async () => {
                                       await db.updatePaymentStatus(req.tournament.id, req.playerRecord.userId, 'REJECTED');
                                       setUserActionMsg(`Rejected payment for ${req.userObj?.name || 'player'}`);
+                                      setTimeout(() => setUserActionMsg(''), 4000);
                                     }}
                                     disabled={req.playerRecord.paymentStatus === 'REJECTED'}
                                     className={`px-2.5 py-1 rounded-lg text-[10px] font-black transition-all ${
@@ -1273,6 +1479,50 @@ export const AdminPortalModal: React.FC<AdminPortalModalProps> = ({ isOpen, onCl
                     </table>
                   </div>
                 </div>
+
+                {(() => {
+                  const allTours = db.getTournaments();
+                  const submissions = allTours.flatMap((t) => {
+                    const players = db.getTournamentPlayers(t.id);
+                    const org = db.getUserById(t.organizerId);
+                    return players
+                      .filter((p) => p.paymentProofUrl || p.paymentStatus)
+                      .map((p) => ({
+                        tournament: t,
+                        playerRecord: p,
+                        userObj: p.user || db.getUserById(p.userId),
+                        organizerName: org?.name || 'Organizer',
+                      }));
+                  });
+
+                  const filtered = submissions.filter((r) => {
+                    if (regFilter !== 'ALL' && r.playerRecord.paymentStatus !== regFilter) {
+                      return false;
+                    }
+                    if (regSearchTerm.trim()) {
+                      const q = regSearchTerm.toLowerCase();
+                      const pName = (r.userObj?.name || r.playerRecord.userId).toLowerCase();
+                      const tName = r.tournament.tournamentName.toLowerCase();
+                      const oName = r.organizerName.toLowerCase();
+                      return pName.includes(q) || tName.includes(q) || oName.includes(q);
+                    }
+                    return true;
+                  });
+
+                  return (
+                    <PaginationControls
+                      currentPage={regPage}
+                      totalItems={filtered.length}
+                      pageSize={regPageSize}
+                      onPageChange={setRegPage}
+                      onPageSizeChange={(size) => {
+                        setRegPageSize(size);
+                        setRegPage(1);
+                      }}
+                      itemLabel="requests"
+                    />
+                  );
+                })()}
               </div>
             )}
           </div>

@@ -1,9 +1,11 @@
 import React, { useState } from 'react';
-import { db } from '../../services/db';
+import { db, auth } from '../../services/db';
 import { compressImage } from '../../utils/imageCompressor';
 import { telegramService } from '../../services/telegramService';
+import { useCursorPagination } from '../../hooks/useCursorPagination';
 import { User, Tournament, Match } from '../../types';
 import { InviteModal } from '../common/InviteModal';
+import { PaginationControls } from '../common/PaginationControls';
 import {
   Trophy,
   Calendar,
@@ -25,7 +27,10 @@ import {
   Copy,
   Check,
   Award,
+  Tv,
+  Key,
 } from 'lucide-react';
+import { TournamentStreamPlayer } from '../stream/TournamentStreamPlayer';
 
 interface PlayerTournamentCenterProps {
   user: User;
@@ -37,7 +42,8 @@ export const PlayerTournamentCenter: React.FC<PlayerTournamentCenterProps> = ({ 
   const [selectedStatus, setSelectedStatus] = useState<string>('ALL');
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [activeTournament, setActiveTournament] = useState<Tournament | null>(initialTournament || null);
-  const [detailTab, setDetailTab] = useState<'STANDINGS' | 'MATCHES' | 'INFO' | 'ROSTER' | 'ORGANIZER'>('INFO');
+  const [detailTab, setDetailTab] = useState<'INFO' | 'ROSTER' | 'WATCH_RESULTS' | 'ORGANIZER'>('INFO');
+  const [watchSubTab, setWatchSubTab] = useState<'STANDINGS' | 'MATCHES'>('STANDINGS');
   const [playerStandingsSubTab, setPlayerStandingsSubTab] = useState<'ROUNDS' | 'FINAL_RESULT'>('ROUNDS');
   const [playerSelectedRound, setPlayerSelectedRound] = useState<number>(1);
   const [, setTick] = useState<number>(0);
@@ -46,6 +52,7 @@ export const PlayerTournamentCenter: React.FC<PlayerTournamentCenterProps> = ({ 
     if (initialTournament) {
       setActiveTournament(initialTournament);
       setDetailTab('INFO');
+      setWatchSubTab('STANDINGS');
     }
   }, [initialTournament]);
 
@@ -84,6 +91,12 @@ export const PlayerTournamentCenter: React.FC<PlayerTournamentCenterProps> = ({ 
   const [isSubmittingPayment, setIsSubmittingPayment] = useState<boolean>(false);
   const [copiedPhone, setCopiedPhone] = useState(false);
 
+  // Registration Code Modal state
+  const [codeRegisterTour, setCodeRegisterTour] = useState<Tournament | null>(null);
+  const [enteredCode, setEnteredCode] = useState<string>('');
+  const [codeRegisterError, setCodeRegisterError] = useState<string | null>(null);
+  const [isSubmittingCode, setIsSubmittingCode] = useState<boolean>(false);
+
   const showToast = (msg: string, type: 'success' | 'error' = 'success') => {
     setToast({ msg, type });
     telegramService.triggerHaptic(type === 'success' ? 'success' : 'warning');
@@ -120,6 +133,34 @@ export const PlayerTournamentCenter: React.FC<PlayerTournamentCenterProps> = ({ 
     return true;
   });
 
+  const [tournamentsPage, setTournamentsPage] = useState(1);
+  const [tournamentsPageSize, setTournamentsPageSize] = useState(10);
+
+  const paginatedTournamentsFallback = filteredTournaments.slice(
+    (tournamentsPage - 1) * tournamentsPageSize,
+    tournamentsPage * tournamentsPageSize
+  );
+
+  const tournamentsPagination = useCursorPagination<Tournament>({
+    fetchPage: async (pageSize, lastDoc) => {
+      const res = await db.getPaginatedTournaments({
+        pageSize,
+        lastDoc,
+        isApproved: true,
+        status: selectedStatus === 'ALL' ? undefined : selectedStatus,
+        game: selectedGame === 'ALL' ? undefined : selectedGame,
+        searchTerm: searchQuery,
+      });
+      return {
+        items: res.tournaments,
+        lastDoc: res.lastDoc,
+        hasMore: res.hasMore,
+      };
+    },
+    pageSize: tournamentsPageSize,
+    dependencies: [selectedGame, selectedStatus, searchQuery],
+  });
+
   const handleOpenRegisterPaymentModal = (tournamentId: string) => {
     if (!user.gamertag) {
       showToast('Please set your gamertag in Profile first!', 'error');
@@ -154,6 +195,21 @@ export const PlayerTournamentCenter: React.FC<PlayerTournamentCenterProps> = ({ 
     e.preventDefault();
     if (!paymentRegisterTourId) return;
 
+    const currentAuthUid = auth.currentUser?.uid || null;
+    const isAnonymous = auth.currentUser?.isAnonymous ?? null;
+    const isUidMatch = currentAuthUid === user.id;
+    const screenshotLength = paymentScreenshotUrl ? paymentScreenshotUrl.length : 0;
+
+    console.log('PAYMENT_DEBUG: SUBMIT INITIATED', {
+      tournamentId: paymentRegisterTourId,
+      userId: user.id,
+      hasScreenshot: Boolean(paymentScreenshotUrl),
+      screenshotLength,
+      authUid: currentAuthUid,
+      isAnonymous,
+      isUidMatch,
+    });
+
     if (!regPhoneNumber.trim()) {
       showToast('Phone number is required to register for tournaments.', 'error');
       return;
@@ -165,25 +221,57 @@ export const PlayerTournamentCenter: React.FC<PlayerTournamentCenterProps> = ({ 
     }
 
     setIsSubmittingPayment(true);
-    // Save phone number to user profile if modified or missing
-    await db.updateUser({
-      id: user.id,
-      phoneNumber: regPhoneNumber.trim(),
-    });
+    try {
+      // Step 1: Save phone number to user profile
+      console.log('PAYMENT_DEBUG: STEP 1 updateUser START', {
+        userId: user.id,
+        phoneNumber: regPhoneNumber.trim(),
+      });
 
-    const success = await db.registerPlayerWithPaymentProof(
-      paymentRegisterTourId,
-      user.id,
-      paymentScreenshotUrl
-    );
-    setIsSubmittingPayment(false);
+      const updateUserRes = await db.updateUser({
+        id: user.id,
+        phoneNumber: regPhoneNumber.trim(),
+      });
 
-    if (success) {
-      showToast('Payment proof submitted! Organizer will verify your registration.');
-      setPaymentRegisterTourId(null);
-      setPaymentScreenshotUrl('');
-    } else {
-      showToast('Registration failed or tournament is full.', 'error');
+      console.log('PAYMENT_DEBUG: STEP 1 updateUser RESULT', {
+        success: updateUserRes,
+      });
+
+      // Step 2: Submit payment proof
+      console.log('PAYMENT_DEBUG: STEP 2 registerPlayerWithPaymentProof START', {
+        tournamentId: paymentRegisterTourId,
+        userId: user.id,
+        screenshotLength,
+      });
+
+      const success = await db.registerPlayerWithPaymentProof(
+        paymentRegisterTourId,
+        user.id,
+        paymentScreenshotUrl
+      );
+
+      console.log('PAYMENT_DEBUG: STEP 2 registerPlayerWithPaymentProof RESULT', {
+        success,
+      });
+
+      if (success) {
+        console.log('PAYMENT_DEBUG: FINAL OUTCOME -> SUCCESS (Payment proof submitted)');
+        showToast('Payment proof submitted! Organizer will verify your registration.');
+        setPaymentRegisterTourId(null);
+        setPaymentScreenshotUrl('');
+      } else {
+        console.warn('PAYMENT_DEBUG: FINAL OUTCOME -> REGISTRATION FAILED (registerPlayerWithPaymentProof returned false)');
+        showToast('Registration failed or tournament is full.', 'error');
+      }
+    } catch (err: any) {
+      console.error('PAYMENT_DEBUG: FINAL OUTCOME -> EXCEPTION THROWN', {
+        name: err?.name,
+        code: err?.code,
+        message: err?.message,
+      });
+      showToast(err?.message || 'Failed to submit payment receipt. Please try again.', 'error');
+    } finally {
+      setIsSubmittingPayment(false);
     }
   };
 
@@ -192,6 +280,83 @@ export const PlayerTournamentCenter: React.FC<PlayerTournamentCenterProps> = ({ 
       db.unregisterPlayer(confirmUnregisterId, user.id);
       showToast('Registration cancelled.');
       setConfirmUnregisterId(null);
+    }
+  };
+
+  const handleStartRegistration = (tournament: Tournament) => {
+    if (!user.gamertag) {
+      showToast('Please set your gamertag in Profile first!', 'error');
+      return;
+    }
+
+    const method =
+      tournament.registrationMethod ||
+      (tournament.registrationFee && tournament.registrationFee !== 'Free' && tournament.registrationFee !== '0 ETB' && tournament.registrationFee !== 'Registration Code'
+        ? 'PAYMENT'
+        : 'OPEN');
+
+    if (method === 'CODE') {
+      setCodeRegisterTour(tournament);
+      setEnteredCode('');
+      setCodeRegisterError(null);
+    } else if (method === 'PAYMENT') {
+      handleOpenRegisterPaymentModal(tournament.id);
+    } else {
+      handleDirectOpenRegister(tournament.id);
+    }
+  };
+
+  const handleDirectOpenRegister = async (tournamentId: string) => {
+    try {
+      const success = await db.registerPlayer(tournamentId, user.id);
+      if (success) {
+        showToast('Registration confirmed! Welcome to the tournament.');
+      } else {
+        showToast('Registration failed or tournament is full.', 'error');
+      }
+    } catch (err: any) {
+      showToast(err?.message || 'Failed to register.', 'error');
+    }
+  };
+
+  const handleCodeSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!codeRegisterTour) return;
+    const cleanCode = enteredCode.trim().toUpperCase();
+
+    if (!cleanCode) {
+      setCodeRegisterError('Please enter your 6-character registration code.');
+      return;
+    }
+    if (cleanCode.length !== 6) {
+      setCodeRegisterError('Registration code must be exactly 6 characters.');
+      return;
+    }
+
+    setIsSubmittingCode(true);
+    setCodeRegisterError(null);
+    try {
+      const result = await db.registerPlayerWithCode(
+        codeRegisterTour.id,
+        user.id,
+        cleanCode,
+        user.name,
+        user.gamertag
+      );
+
+      if (result.success) {
+        showToast(result.message || 'Registration successful! You are confirmed for this challenge.');
+        setCodeRegisterTour(null);
+        setEnteredCode('');
+      } else {
+        setCodeRegisterError(result.message || 'Failed to register with code.');
+        showToast(result.message || 'Registration failed.', 'error');
+      }
+    } catch (err: any) {
+      setCodeRegisterError(err?.message || 'An unexpected error occurred. Please try again.');
+      showToast(err?.message || 'Failed to register.', 'error');
+    } finally {
+      setIsSubmittingCode(false);
     }
   };
 
@@ -319,7 +484,12 @@ export const PlayerTournamentCenter: React.FC<PlayerTournamentCenterProps> = ({ 
 
       {/* Tournament Cards Grid */}
       <div className="space-y-3">
-        {filteredTournaments.length === 0 ? (
+        {tournamentsPagination.isLoading && tournamentsPagination.items.length === 0 ? (
+          <div className="text-center py-10 bg-slate-850 rounded-2xl border border-slate-750 p-6 space-y-3 animate-pulse">
+            <Trophy className="w-10 h-10 text-slate-500 mx-auto" />
+            <p className="text-sm text-slate-300 font-bold">Loading tournaments...</p>
+          </div>
+        ) : (tournamentsPagination.items.length > 0 ? tournamentsPagination.items : paginatedTournamentsFallback).length === 0 ? (
           <div className="text-center py-10 bg-slate-850 rounded-2xl border border-slate-750 p-6 space-y-3">
             <Trophy className="w-10 h-10 text-slate-600 mx-auto" />
             <div>
@@ -338,7 +508,7 @@ export const PlayerTournamentCenter: React.FC<PlayerTournamentCenterProps> = ({ 
             </button>
           </div>
         ) : (
-          filteredTournaments.map((t) => {
+          (tournamentsPagination.items.length > 0 ? tournamentsPagination.items : paginatedTournamentsFallback).map((t) => {
             const isRegistered = db.isPlayerRegistered(t.id, user.id);
             const confirmedPlayers = db.getConfirmedTournamentPlayers(t.id);
             const pendingPlayers = db.getPendingTournamentPlayers(t.id);
@@ -396,9 +566,16 @@ export const PlayerTournamentCenter: React.FC<PlayerTournamentCenterProps> = ({ 
                           <MapPin className="w-3.5 h-3.5 text-rose-400 shrink-0" />
                           <span className="text-slate-200 font-bold">{t.venueLocation || t.venueName || 'Addis Ababa'}</span>
                         </span>
-                        <span className="flex items-center gap-1 font-bold text-amber-300 bg-amber-500/10 px-2 py-0.5 rounded-lg border border-amber-500/20">
-                          Fee: {t.registrationFee || '50 ETB'}
-                        </span>
+                        {t.registrationMethod === 'CODE' ? (
+                          <span className="flex items-center gap-1 font-bold text-amber-300 bg-amber-500/10 px-2 py-0.5 rounded-lg border border-amber-500/20">
+                            <Key className="w-3 h-3 text-amber-400" />
+                            Entry: Code Required
+                          </span>
+                        ) : (
+                          <span className="flex items-center gap-1 font-bold text-amber-300 bg-amber-500/10 px-2 py-0.5 rounded-lg border border-amber-500/20">
+                            Fee: {t.registrationFee || '50 ETB'}
+                          </span>
+                        )}
                         {(t.award || t.prizePool) && (
                           <span className="flex items-center gap-1 font-bold text-amber-400 bg-amber-500/10 px-2 py-0.5 rounded-lg border border-amber-500/20">
                             <Award className="w-3.5 h-3.5 text-amber-400" />
@@ -466,6 +643,7 @@ export const PlayerTournamentCenter: React.FC<PlayerTournamentCenterProps> = ({ 
                           onClick={() => {
                             setActiveTournament(t);
                             setDetailTab('INFO');
+                            setWatchSubTab('STANDINGS');
                             telegramService.triggerHaptic('light');
                           }}
                           className="flex items-center gap-1 text-xs font-bold text-slate-300 hover:text-white bg-slate-800 hover:bg-slate-750 px-3 py-2 rounded-xl border border-slate-700 transition-colors min-h-[38px] capitalize"
@@ -490,6 +668,11 @@ export const PlayerTournamentCenter: React.FC<PlayerTournamentCenterProps> = ({ 
                             <Clock className="w-3.5 h-3.5 text-amber-400 animate-pulse" />
                             Pending Approval
                           </span>
+                        ) : userPlayerRecord?.registrationMethod === 'CODE' ? (
+                          <span className="text-[11px] font-extrabold text-amber-300 bg-amber-500/10 px-3 py-2 rounded-xl border border-amber-500/30 flex items-center gap-1.5 shadow-sm">
+                            <Key className="w-3.5 h-3.5 text-amber-400" />
+                            Registered (Code)
+                          </span>
                         ) : (
                           <span className="text-[11px] font-extrabold text-emerald-300 bg-emerald-500/10 px-3 py-2 rounded-xl border border-emerald-500/30 flex items-center gap-1.5 shadow-sm">
                             <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
@@ -498,14 +681,23 @@ export const PlayerTournamentCenter: React.FC<PlayerTournamentCenterProps> = ({ 
                         )
                       ) : (
                         <button
-                          onClick={() => handleOpenRegisterPaymentModal(t.id)}
+                          onClick={() => handleStartRegistration(t)}
                           disabled={isFull || t.status === 'Ongoing' || t.status === 'Completed' || t.status === 'Finished'}
-                          className="text-xs font-extrabold text-slate-950 bg-sky-400 hover:bg-sky-300 disabled:opacity-50 px-4 py-2 rounded-xl transition-all shadow-md active:scale-95 min-h-[38px] flex items-center gap-1.5"
+                          className={`text-xs font-extrabold px-4 py-2 rounded-xl transition-all shadow-md active:scale-95 min-h-[38px] flex items-center gap-1.5 ${
+                            t.registrationMethod === 'CODE'
+                              ? 'text-slate-950 bg-amber-400 hover:bg-amber-300'
+                              : 'text-slate-950 bg-sky-400 hover:bg-sky-300'
+                          } disabled:opacity-50`}
                         >
+                          {t.registrationMethod === 'CODE' && !isFull && t.status !== 'Ongoing' && t.status !== 'Completed' && t.status !== 'Finished' && (
+                            <Key className="w-3.5 h-3.5" />
+                          )}
                           {t.status === 'Ongoing' || t.status === 'Completed' || t.status === 'Finished'
                             ? 'Registration Closed'
                             : isFull
                             ? 'Tournament Full'
+                            : t.registrationMethod === 'CODE'
+                            ? 'Register with Code'
                             : 'Register'}
                         </button>
                       )}
@@ -517,6 +709,18 @@ export const PlayerTournamentCenter: React.FC<PlayerTournamentCenterProps> = ({ 
           })
         )}
       </div>
+
+      <PaginationControls
+        currentPage={tournamentsPagination.currentPage}
+        totalItems={tournamentsPagination.totalItemsEstimate > 0 ? tournamentsPagination.totalItemsEstimate : filteredTournaments.length}
+        pageSize={tournamentsPagination.pageSize}
+        onPageChange={(p) => tournamentsPagination.goToPage(p)}
+        onPageSizeChange={(size) => {
+          setTournamentsPageSize(size);
+          tournamentsPagination.changePageSize(size);
+        }}
+        itemLabel="tournaments"
+      />
 
       {/* TOURNAMENT DETAIL MODAL */}
       {activeTournament && (() => {
@@ -552,7 +756,7 @@ export const PlayerTournamentCenter: React.FC<PlayerTournamentCenterProps> = ({ 
               </div>
             </div>
 
-            {/* Detail Tabs - OVERVIEW, PLAYERS, STANDINGS, MATCHES */}
+            {/* Detail Tabs - OVERVIEW, PLAYERS, WATCH & RESULTS */}
             <div className="flex border-b border-slate-800 bg-slate-850 px-4 text-xs font-semibold overflow-x-auto no-scrollbar">
               <button
                 onClick={() => setDetailTab('INFO')}
@@ -577,26 +781,15 @@ export const PlayerTournamentCenter: React.FC<PlayerTournamentCenterProps> = ({ 
                 PLAYERS ({liveActiveTournament ? db.getTournamentPlayers(liveActiveTournament.id).length : 0})
               </button>
               <button
-                onClick={() => setDetailTab('STANDINGS')}
+                onClick={() => setDetailTab('WATCH_RESULTS')}
                 className={`py-3 px-4 border-b-2 font-black uppercase whitespace-nowrap transition-colors flex items-center gap-1.5 ${
-                  detailTab === 'STANDINGS'
+                  detailTab === 'WATCH_RESULTS'
                     ? 'border-amber-400 text-amber-400'
                     : 'border-transparent text-slate-400 hover:text-slate-200'
                 }`}
               >
-                <Trophy className="w-3.5 h-3.5 text-amber-400" />
-                STANDINGS
-              </button>
-              <button
-                onClick={() => setDetailTab('MATCHES')}
-                className={`py-3 px-4 border-b-2 font-black uppercase whitespace-nowrap transition-colors flex items-center gap-1.5 ${
-                  detailTab === 'MATCHES'
-                    ? 'border-sky-400 text-sky-400'
-                    : 'border-transparent text-slate-400 hover:text-slate-200'
-                }`}
-              >
-                <Swords className="w-3.5 h-3.5 text-sky-400" />
-                MATCHES
+                <Tv className="w-3.5 h-3.5 text-amber-400" />
+                WATCH & RESULTS
               </button>
             </div>
 
@@ -612,9 +805,14 @@ export const PlayerTournamentCenter: React.FC<PlayerTournamentCenterProps> = ({ 
                       </p>
                     </div>
                     <div>
-                      <p className="text-slate-400 font-medium">Entry Fee</p>
-                      <p className="font-extrabold text-amber-300 text-sm">
-                        {activeTournament.registrationFee || '50 ETB'}
+                      <p className="text-slate-400 font-medium">
+                        {activeTournament.registrationMethod === 'CODE' ? 'Access Method' : 'Entry Fee'}
+                      </p>
+                      <p className="font-extrabold text-amber-300 text-sm flex items-center gap-1">
+                        {activeTournament.registrationMethod === 'CODE' && <Key className="w-3.5 h-3.5 text-amber-400" />}
+                        {activeTournament.registrationMethod === 'CODE'
+                          ? 'Registration Code'
+                          : activeTournament.registrationFee || '50 ETB'}
                       </p>
                     </div>
                     {(activeTournament.award || activeTournament.prizePool) && (
@@ -703,9 +901,47 @@ export const PlayerTournamentCenter: React.FC<PlayerTournamentCenterProps> = ({ 
                 </div>
               )}
 
-              {/* STANDINGS TAB */}
-              {detailTab === 'STANDINGS' && (
+              {/* WATCH & RESULTS TAB */}
+              {detailTab === 'WATCH_RESULTS' && (
                 <div className="space-y-4">
+                  {/* LEVEL 1 — YOUTUBE VIDEO (IF CONFIGURED) */}
+                  {Boolean((liveActiveTournament || activeTournament).youtubeVideoId) && (
+                    <TournamentStreamPlayer
+                      tournament={liveActiveTournament || activeTournament}
+                    />
+                  )}
+
+                  {/* LEVEL 2 — STANDINGS | MATCHES TABS */}
+                  <div className="grid grid-cols-2 gap-2 p-1 bg-slate-900 border border-slate-800 rounded-xl">
+                    <button
+                      type="button"
+                      onClick={() => setWatchSubTab('STANDINGS')}
+                      className={`py-2 px-3 rounded-lg text-xs font-black uppercase transition-all flex items-center justify-center gap-1.5 ${
+                        watchSubTab === 'STANDINGS'
+                          ? 'bg-amber-400 text-slate-950 shadow-xs'
+                          : 'text-slate-400 hover:text-white'
+                      }`}
+                    >
+                      <Trophy className="w-3.5 h-3.5" />
+                      Standings
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setWatchSubTab('MATCHES')}
+                      className={`py-2 px-3 rounded-lg text-xs font-black uppercase transition-all flex items-center justify-center gap-1.5 ${
+                        watchSubTab === 'MATCHES'
+                          ? 'bg-sky-400 text-slate-950 shadow-xs'
+                          : 'text-slate-400 hover:text-white'
+                      }`}
+                    >
+                      <Swords className="w-3.5 h-3.5" />
+                      Matches
+                    </button>
+                  </div>
+
+                  {/* STANDINGS SUB-TAB */}
+                  {watchSubTab === 'STANDINGS' && (
+                    <div className="space-y-4">
                   {/* Sub-tabs: ROUNDS vs FINAL RESULT */}
                   <div className="flex bg-slate-800 p-1 rounded-xl gap-1 text-xs font-bold">
                     <button
@@ -881,8 +1117,8 @@ export const PlayerTournamentCenter: React.FC<PlayerTournamentCenterProps> = ({ 
                 </div>
               )}
 
-              {/* MATCHES TAB */}
-              {detailTab === 'MATCHES' && (
+              {/* MATCHES SUB-TAB */}
+              {watchSubTab === 'MATCHES' && (
                 <div className="space-y-4">
                   {/* Round Selector Tabs */}
                   <div className="flex gap-1.5 overflow-x-auto pb-1 no-scrollbar">
@@ -972,6 +1208,8 @@ export const PlayerTournamentCenter: React.FC<PlayerTournamentCenterProps> = ({ 
                       );
                     });
                   })()}
+                </div>
+              )}
                 </div>
               )}
 
@@ -1090,16 +1328,25 @@ export const PlayerTournamentCenter: React.FC<PlayerTournamentCenterProps> = ({ 
                 Invite Players
               </button>
               <button
-                onClick={() => handleOpenRegisterPaymentModal(activeTournament.id)}
+                onClick={() => handleStartRegistration(activeTournament)}
                 disabled={isActiveRegistered || isActiveFull || activeTournament.status === 'Ongoing' || activeTournament.status === 'Completed' || activeTournament.status === 'Finished'}
-                className="text-xs font-extrabold px-4 py-2 bg-sky-400 hover:bg-sky-300 disabled:opacity-50 text-slate-950 rounded-xl transition-all shadow-md active:scale-95 flex items-center gap-1.5"
+                className={`text-xs font-extrabold px-4 py-2 ${
+                  activeTournament.registrationMethod === 'CODE'
+                    ? 'bg-amber-400 hover:bg-amber-300'
+                    : 'bg-sky-400 hover:bg-sky-300'
+                } disabled:opacity-50 text-slate-950 rounded-xl transition-all shadow-md active:scale-95 flex items-center gap-1.5`}
               >
+                {activeTournament.registrationMethod === 'CODE' && !isActiveRegistered && !isActiveFull && activeTournament.status !== 'Ongoing' && activeTournament.status !== 'Completed' && activeTournament.status !== 'Finished' && (
+                  <Key className="w-3.5 h-3.5" />
+                )}
                 {isActiveRegistered
                   ? 'Registered'
                   : activeTournament.status === 'Ongoing' || activeTournament.status === 'Completed' || activeTournament.status === 'Finished'
                   ? 'Registration Closed'
                   : isActiveFull
                   ? 'Tournament Full'
+                  : activeTournament.registrationMethod === 'CODE'
+                  ? 'Register with Code'
                   : 'Register'}
               </button>
               <button
@@ -1261,6 +1508,125 @@ export const PlayerTournamentCenter: React.FC<PlayerTournamentCenterProps> = ({ 
           </div>
         );
       })()}
+
+      {/* REGISTRATION CODE MODAL */}
+      {codeRegisterTour && (
+        <div className="fixed inset-0 z-50 bg-slate-950/85 backdrop-blur-md flex items-center justify-center p-4">
+          <div className="bg-slate-900 border border-slate-750 rounded-2xl p-5 max-w-md w-full space-y-4 shadow-2xl relative">
+            <div className="flex items-center justify-between border-b border-slate-800 pb-3">
+              <div className="flex items-center gap-2">
+                <div className="w-8 h-8 rounded-lg bg-amber-500/20 text-amber-300 flex items-center justify-center border border-amber-500/30">
+                  <Key className="w-4 h-4 text-amber-400" />
+                </div>
+                <div>
+                  <h3 className="font-extrabold text-white text-sm">
+                    Enter Registration Code
+                  </h3>
+                  <p className="text-[10px] text-slate-400">
+                    {codeRegisterTour.tournamentName}
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => {
+                  setCodeRegisterTour(null);
+                  setEnteredCode('');
+                  setCodeRegisterError(null);
+                }}
+                className="text-slate-400 hover:text-white"
+              >
+                ✕
+              </button>
+            </div>
+
+            <form onSubmit={handleCodeSubmit} className="space-y-4">
+              <div className="p-3 bg-amber-500/10 border border-amber-500/20 rounded-xl text-xs text-amber-200 flex items-start gap-2">
+                <Info className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
+                <span>
+                  This challenge requires an authorized registration code provided by the organizer. Each code is single-use and confirms your spot.
+                </span>
+              </div>
+
+              {/* Player Identity Confirmation */}
+              <div className="p-3 bg-slate-950/80 rounded-xl border border-slate-800 flex items-center justify-between">
+                <div>
+                  <span className="text-[10px] text-slate-400 block font-bold">Registering Account:</span>
+                  <span className="font-extrabold text-white text-xs">{user.name}</span>
+                </div>
+                <span className="text-xs font-mono font-bold text-sky-400 bg-sky-500/10 px-2 py-0.5 rounded border border-sky-500/20">
+                  @{user.gamertag}
+                </span>
+              </div>
+
+              {/* Code Input Field */}
+              <div className="space-y-1.5">
+                <label className="text-xs font-bold text-slate-300 flex items-center justify-between">
+                  <span>6-Character Code</span>
+                  <span className="text-[10px] text-slate-400">Case-insensitive</span>
+                </label>
+                <div className="relative">
+                  <input
+                    type="text"
+                    maxLength={6}
+                    value={enteredCode}
+                    onChange={(e) => {
+                      setEnteredCode(e.target.value.toUpperCase().replace(/[^A-Z0-9]/g, ''));
+                      if (codeRegisterError) setCodeRegisterError(null);
+                    }}
+                    placeholder="E.G. A9B2X7"
+                    className="w-full bg-slate-950 border border-slate-700 focus:border-amber-400 rounded-xl px-4 py-3 text-center text-xl font-mono font-black tracking-widest text-amber-300 placeholder-slate-600 focus:outline-hidden"
+                    autoFocus
+                  />
+                  {enteredCode.length > 0 && (
+                    <span className="absolute right-3.5 top-3.5 text-xs font-mono font-bold text-slate-500">
+                      {enteredCode.length}/6
+                    </span>
+                  )}
+                </div>
+              </div>
+
+              {codeRegisterError && (
+                <div className="p-3 bg-rose-500/15 border border-rose-500/30 rounded-xl text-xs text-rose-300 flex items-center gap-2">
+                  <AlertCircle className="w-4 h-4 text-rose-400 shrink-0" />
+                  <span>{codeRegisterError}</span>
+                </div>
+              )}
+
+              <div className="flex justify-end gap-2 pt-2 border-t border-slate-800">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setCodeRegisterTour(null);
+                    setEnteredCode('');
+                    setCodeRegisterError(null);
+                  }}
+                  className="px-4 py-2 bg-slate-800 hover:bg-slate-750 text-slate-300 text-xs font-bold rounded-xl"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={enteredCode.trim().length !== 6 || isSubmittingCode}
+                  className="px-5 py-2 bg-amber-400 hover:bg-amber-300 disabled:opacity-50 text-slate-950 font-black text-xs rounded-xl shadow-md flex items-center gap-1.5 transition-all"
+                >
+                  {isSubmittingCode ? (
+                    <>
+                      <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                      Verifying...
+                    </>
+                  ) : (
+                    <>
+                      <Check className="w-4 h-4 stroke-[3]" />
+                      Confirm Registration
+                    </>
+                  )}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
 
       {/* SHARE / INVITE MODAL */}
       {inviteTourModal && (

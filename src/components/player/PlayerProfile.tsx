@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { db } from '../../services/db';
 import { User, Tournament, Match } from '../../types';
+import { PaginationControls } from '../common/PaginationControls';
 import {
   Gamepad2,
   Send,
@@ -76,6 +77,10 @@ export const PlayerProfile: React.FC<PlayerProfileProps> = ({ user }) => {
       }
       return b.id.localeCompare(a.id);
     });
+
+  const [tourPage, setTourPage] = useState(1);
+  const [tourPageSize, setTourPageSize] = useState(5);
+  const paginatedUserTournaments = userTournaments.slice((tourPage - 1) * tourPageSize, tourPage * tourPageSize);
 
   const orgRequests = db.getOrganizerRequests();
   const userOrgReq = orgRequests.find((r) => r.userId === user.id || r.telegramUserId === (user.telegramUserId || '').replace(/^tg_/, ''));
@@ -391,56 +396,72 @@ export const PlayerProfile: React.FC<PlayerProfileProps> = ({ user }) => {
         {userTournaments.length === 0 ? (
           <p className="text-xs text-slate-500 text-center py-4">You have not registered for any tournaments yet.</p>
         ) : (
-          <div className="space-y-2">
-            {userTournaments.map((t) => {
-              const players = db.getTournamentPlayers(t.id);
-              const playerRecord = players.find((p) => p.userId === user.id);
-              const matches = db.getAllMatches().filter(
-                (m) => m.tournamentId === t.id && (m.playerAId === user.id || m.playerBId === user.id)
-              );
-              const wins = matches.filter((m) => m.winnerId === user.id).length;
+          <div className="space-y-3">
+            <div className="space-y-2">
+              {paginatedUserTournaments.map((t) => {
+                const players = db.getTournamentPlayers(t.id);
+                const playerRecord = players.find((p) => p.userId === user.id);
+                const matches = db.getAllMatches().filter(
+                  (m) => m.tournamentId === t.id && (m.playerAId === user.id || m.playerBId === user.id)
+                );
+                const wins = matches.filter((m) => m.winnerId === user.id).length;
 
-              return (
-                <div
-                  key={t.id}
-                  onClick={() => setSelectedTournamentHistory(t)}
-                  className="p-3.5 bg-slate-900 hover:bg-slate-800 border border-slate-750 hover:border-amber-500/40 rounded-xl flex items-center justify-between text-xs cursor-pointer transition-all shadow-md group"
-                >
-                  <div className="flex items-center gap-3 min-w-0">
-                    <img
-                      src={t.image}
-                      alt={t.tournamentName}
-                      className="w-10 h-10 rounded-xl object-cover shrink-0 border border-slate-700"
-                    />
-                    <div className="min-w-0">
-                      <p className="font-bold text-white truncate group-hover:text-amber-300 transition-colors">
-                        {t.tournamentName}
-                      </p>
-                      <p className="text-[10px] text-slate-400 font-mono mt-0.5">
-                        {t.game} • {t.date} • <span className="text-emerald-400 font-bold">{wins} Wins</span>
-                      </p>
-                      {playerRecord?.checkInCode && (
-                        <p className="text-[10px] text-amber-300 font-mono font-bold mt-0.5">
-                          Check-in Code: {playerRecord.checkInCode.replace(/^SG-/, '')}
+                return (
+                  <div
+                    key={t.id}
+                    onClick={() => setSelectedTournamentHistory(t)}
+                    className="p-3.5 bg-slate-900 hover:bg-slate-800 border border-slate-750 hover:border-amber-500/40 rounded-xl flex items-center justify-between text-xs cursor-pointer transition-all shadow-md group"
+                  >
+                    <div className="flex items-center gap-3 min-w-0">
+                      <img
+                        src={t.image}
+                        alt={t.tournamentName}
+                        className="w-10 h-10 rounded-xl object-cover shrink-0 border border-slate-700"
+                      />
+                      <div className="min-w-0">
+                        <p className="font-bold text-white truncate group-hover:text-amber-300 transition-colors">
+                          {t.tournamentName}
                         </p>
+                        <p className="text-[10px] text-slate-400 font-mono mt-0.5">
+                          {t.game} • {t.date} • <span className="text-emerald-400 font-bold">{wins} Wins</span>
+                        </p>
+                        {playerRecord?.checkInCode && (
+                          <p className="text-[10px] text-amber-300 font-mono font-bold mt-0.5">
+                            Check-in Code: {playerRecord.checkInCode.replace(/^SG-/, '')}
+                          </p>
+                        )}
+                      </div>
+                    </div>
+
+                    <div className="flex items-center gap-2 shrink-0">
+                      {playerRecord?.paymentStatus === 'PENDING_APPROVAL' && (
+                        <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-amber-500/20 text-amber-300 border border-amber-500/30">
+                          Payment Pending
+                        </span>
                       )}
+                      <span className="px-2.5 py-1 rounded-full text-[10px] font-bold bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">
+                        {playerRecord?.playerStatus || 'Registered'}
+                      </span>
+                      <ChevronRight className="w-4 h-4 text-slate-400 group-hover:text-amber-400 transition-transform group-hover:translate-x-0.5" />
                     </div>
                   </div>
+                );
+              })}
+            </div>
 
-                  <div className="flex items-center gap-2 shrink-0">
-                    {playerRecord?.paymentStatus === 'PENDING_APPROVAL' && (
-                      <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-amber-500/20 text-amber-300 border border-amber-500/30">
-                        Payment Pending
-                      </span>
-                    )}
-                    <span className="px-2.5 py-1 rounded-full text-[10px] font-bold bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">
-                      {playerRecord?.playerStatus || 'Registered'}
-                    </span>
-                    <ChevronRight className="w-4 h-4 text-slate-400 group-hover:text-amber-400 transition-transform group-hover:translate-x-0.5" />
-                  </div>
-                </div>
-              );
-            })}
+            {userTournaments.length > 5 && (
+              <PaginationControls
+                currentPage={tourPage}
+                totalItems={userTournaments.length}
+                pageSize={tourPageSize}
+                onPageChange={setTourPage}
+                onPageSizeChange={(size) => {
+                  setTourPageSize(size);
+                  setTourPage(1);
+                }}
+                itemLabel="tournaments"
+              />
+            )}
           </div>
         )}
       </div>

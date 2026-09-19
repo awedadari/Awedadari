@@ -52,7 +52,11 @@
         "format": { "type": "string" },
         "isApproved": { "type": "boolean" },
         "registrationFee": { "type": "string" },
-        "prizePool": { "type": "string" }
+        "prizePool": { "type": "string" },
+        "registrationMethod": { "type": "string", "enum": ["OPEN", "CODE", "PAYMENT"] },
+        "registeredPlayersCount": { "type": "number" },
+        "youtubeVideoId": { "type": "string" },
+        "youtubeStreamUrl": { "type": "string" }
       },
       "required": ["organizerId"]
     },
@@ -65,9 +69,29 @@
         "userId": { "type": "string" },
         "paymentProofUrl": { "type": "string" },
         "paymentStatus": { "type": "string", "enum": ["PENDING", "CONFIRMED", "REJECTED"] },
-        "isCheckedIn": { "type": "boolean" }
+        "isCheckedIn": { "type": "boolean" },
+        "registrationMethod": { "type": "string" },
+        "registrationCode": { "type": "string" }
       },
       "required": ["tournamentId", "userId"]
+    },
+    "RegistrationCode": {
+      "title": "RegistrationCode",
+      "description": "Single-use 6-character access code for tournament registration",
+      "type": "object",
+      "properties": {
+        "tournamentId": { "type": "string" },
+        "code": { "type": "string" },
+        "status": { "type": "string", "enum": ["AVAILABLE", "USED"] },
+        "batchId": { "type": "string" },
+        "batchNumber": { "type": "number" },
+        "usedBy": { "type": "string" },
+        "usedByName": { "type": "string" },
+        "usedByGamertag": { "type": "string" },
+        "usedAt": { "type": "string" },
+        "createdAt": { "type": "string" }
+      },
+      "required": ["tournamentId", "code", "status", "batchId"]
     },
     "Match": {
       "title": "Match",
@@ -174,6 +198,10 @@
     "/withdrawalRequests/{requestId}": {
       "schema": { "$ref": "#/entities/WithdrawalRequest" },
       "description": "Organizer payout withdrawal requests"
+    },
+    "/registrationCodes/{codeId}": {
+      "schema": { "$ref": "#/entities/RegistrationCode" },
+      "description": "Tournament registration access codes"
     }
   }
 }

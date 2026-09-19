@@ -17,6 +17,8 @@ export interface User {
   profileImage: string;
   telegramUserId: string;
   role: UserRole;
+  firebaseAuthUid?: string;
+  email?: string;
   gamertag?: string;
   favGame?: string;
   venueName?: string;
@@ -101,6 +103,8 @@ export interface TournamentSession {
   scores: SessionPlayerScore[];
 }
 
+export type RegistrationMethod = 'OPEN' | 'CODE' | 'PAYMENT';
+
 export interface Tournament {
   id: string;
   tournamentCode?: string; // 4-digit unique sequential code (e.g. "0001", "0047")
@@ -110,6 +114,8 @@ export interface Tournament {
   date: string;
   time: string;
   maxPlayers: number;
+  registeredPlayersCount?: number;
+  registrationMethod?: RegistrationMethod;
   registrationDeadline?: string;
   status: TournamentStatus;
   organizerId: string;
@@ -133,6 +139,8 @@ export interface Tournament {
   finalStandings?: FinalStanding[];
   placementPointsConfig?: Record<number, number>; // e.g. {1: 15, 2: 12, 3: 10, 4: 8, 5: 6, 6: 4, 7: 2, 8: 1}
   killMultiplier?: number; // default 1
+  youtubeVideoId?: string; // YouTube video ID for livestream or match recording
+  youtubeStreamUrl?: string; // Full YouTube URL for external fallback
   createdAt?: string;
 }
 
@@ -170,6 +178,32 @@ export interface TournamentPlayer {
   paymentSubmittedAt?: string;
   seed?: number;
   checkInCode?: string; // e.g. "SG-8921" for QR/Code check-in
+  registrationMethod?: RegistrationMethod;
+  registrationCode?: string;
+}
+
+export type RegistrationCodeStatus = 'AVAILABLE' | 'USED';
+
+export interface RegistrationCode {
+  id: string; // `${tournamentId}_${code}`
+  tournamentId: string;
+  code: string; // 6-character uppercase string
+  status: RegistrationCodeStatus;
+  batchId: string;
+  batchNumber: number;
+  usedBy?: string | null;
+  usedByName?: string | null;
+  usedByGamertag?: string | null;
+  usedAt?: string | null;
+  createdAt: string;
+}
+
+export interface RegistrationCodeBatch {
+  id: string;
+  tournamentId: string;
+  batchNumber: number;
+  totalCodes: number;
+  createdAt: string;
 }
 
 export interface Match {
@@ -258,4 +292,5 @@ export interface WithdrawalRequest {
   requestedAt: string;
   processedAt?: string;
 }
+
 

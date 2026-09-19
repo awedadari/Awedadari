@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { db, DatabaseService } from '../../services/db';
 import { User, Tournament, RankedPlayerGameProfile, GameCategoryInfo } from '../../types';
+import { PaginationControls } from '../common/PaginationControls';
 import {
   Trophy,
   Search,
@@ -66,6 +67,13 @@ export const PlayersLeaderboardView: React.FC<PlayersLeaderboardViewProps> = ({
     availableGames.find((g) => g.key === selectedGameKey) ||
     DatabaseService.getGameDisplayInfo(selectedGameKey || 'efootball');
 
+  const [leaderboardPage, setLeaderboardPage] = useState(1);
+  const [leaderboardPageSize, setLeaderboardPageSize] = useState(15);
+
+  useEffect(() => {
+    setLeaderboardPage(1);
+  }, [searchTerm, selectedGameKey]);
+
   const rankedPlayers = db.getRankedPlayersForGame(selectedGameKey);
 
   const filteredPlayers = rankedPlayers.filter((p) => {
@@ -76,6 +84,11 @@ export const PlayersLeaderboardView: React.FC<PlayersLeaderboardViewProps> = ({
       (p.user.favGame && p.user.favGame.toLowerCase().includes(term))
     );
   });
+
+  const paginatedPlayers = filteredPlayers.slice(
+    (leaderboardPage - 1) * leaderboardPageSize,
+    leaderboardPage * leaderboardPageSize
+  );
 
   const top3 = rankedPlayers.slice(0, 3);
 
@@ -286,7 +299,7 @@ export const PlayersLeaderboardView: React.FC<PlayersLeaderboardViewProps> = ({
                   </td>
                 </tr>
               ) : (
-                filteredPlayers.map((rp) => {
+                paginatedPlayers.map((rp) => {
                   const isMe = rp.user.id === currentUser.id;
                   return (
                     <tr
@@ -380,6 +393,18 @@ export const PlayersLeaderboardView: React.FC<PlayersLeaderboardViewProps> = ({
             </tbody>
           </table>
         </div>
+
+        <PaginationControls
+          currentPage={leaderboardPage}
+          totalItems={filteredPlayers.length}
+          pageSize={leaderboardPageSize}
+          onPageChange={setLeaderboardPage}
+          onPageSizeChange={(size) => {
+            setLeaderboardPageSize(size);
+            setLeaderboardPage(1);
+          }}
+          itemLabel="competitors"
+        />
       </div>
 
       {/* RATING FORMULA MODAL */}

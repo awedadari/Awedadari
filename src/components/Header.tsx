@@ -1,18 +1,32 @@
 import React from 'react';
 import { User } from '../types';
-import { ShieldCheck, Shield, User as UserIcon } from 'lucide-react';
+import { ShieldCheck, LogOut } from 'lucide-react';
+import { auth, db } from '../services/db';
 
 interface HeaderProps {
   activeUser: User;
   loading?: boolean;
   onOpenAdminPortal?: () => void;
+  onLogout?: () => void;
 }
 
 export const Header: React.FC<HeaderProps> = ({
   activeUser,
   loading,
   onOpenAdminPortal,
+  onLogout,
 }) => {
+  const handleSignOut = async () => {
+    try {
+      await auth.signOut();
+    } catch (err) {
+      console.warn('Firebase signout warning:', err);
+    }
+    db.logout();
+    if (onLogout) {
+      onLogout();
+    }
+  };
   return (
     <header className="sticky top-0 z-40 bg-slate-900/90 backdrop-blur-md border-b border-slate-800 text-slate-100 shadow-md">
       {/* Main Header User Profile Bar */}
@@ -52,7 +66,7 @@ export const Header: React.FC<HeaderProps> = ({
           </div>
         </div>
 
-        {/* Right Controls: Admin Portal */}
+        {/* Right Controls: Admin Portal & Web Sign Out */}
         <div className="flex items-center gap-1.5 shrink-0">
           {onOpenAdminPortal && (
             <button
@@ -63,6 +77,13 @@ export const Header: React.FC<HeaderProps> = ({
               <ShieldCheck className="w-4 h-4 text-amber-400" />
             </button>
           )}
+          <button
+            onClick={handleSignOut}
+            className="p-2 bg-slate-800 hover:bg-slate-750 text-slate-400 hover:text-rose-400 border border-slate-700 rounded-xl transition-all shadow-xs active:scale-95 flex items-center gap-1 text-[11px] font-bold"
+            title="Sign Out of AwedAdari"
+          >
+            <LogOut className="w-4 h-4" />
+          </button>
         </div>
       </div>
     </header>

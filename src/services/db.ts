@@ -2,6 +2,8 @@ import { initializeApp, getApps } from 'firebase/app';
 import { compressImage } from '../utils/imageCompressor';
 import {
   getAuth,
+  setPersistence,
+  browserLocalPersistence,
   signInWithEmailAndPassword,
   signOut,
   onAuthStateChanged,
@@ -27,6 +29,10 @@ import {
   limit,
   orderBy,
   documentId,
+  startAfter,
+  QueryDocumentSnapshot,
+  DocumentSnapshot,
+  getCountFromServer,
   Unsubscribe,
 } from 'firebase/firestore';
 import firebaseConfig from '../../firebase-applet-config.json';
@@ -55,6 +61,9 @@ import {
   PlayerGameStats,
   RankedPlayerGameProfile,
   GameCategoryInfo,
+  RegistrationMethod,
+  RegistrationCode,
+  RegistrationCodeStatus,
 } from '../types';
 import {
   INITIAL_USERS,
@@ -76,6 +85,7 @@ function initFirestoreWithPersistentCache() {
         localCache: persistentLocalCache({
           tabManager: persistentMultipleTabManager(),
         }),
+        experimentalAutoDetectLongPolling: true,
       },
       dbId
     );
@@ -87,6 +97,26 @@ function initFirestoreWithPersistentCache() {
 
 export const firestore = initFirestoreWithPersistentCache();
 export const auth = getAuth(app);
+
+// Explicitly ensure local browser persistence is enforced for all authenticated sessions
+try {
+  if (typeof window !== 'undefined') {
+    setPersistence(auth, browserLocalPersistence).catch((err) => {
+      console.warn('Firebase setPersistence warning:', err);
+    });
+  }
+} catch (e) {
+  console.warn('Firebase setPersistence error:', e);
+}
+
+export interface AdminLoginResult {
+  success: boolean;
+  errorCode?: string;
+  errorMessage?: string;
+  user?: FirebaseUser;
+  previousSessionPresent?: boolean;
+  providerIds?: string[];
+}
 
 export enum OperationType {
   CREATE = 'create',
@@ -139,13 +169,21 @@ const STORAGE_KEY_ACTIVE_USER = 'tc_active_user_id_v2';
 const DEFAULT_APPROVED_ORGANIZER_IDS = ['88492019', '777000', '123456789', '99887766'];
 
 export class DatabaseService {
-  private users: User[] = this.loadUsersFromCache();
+  private users: User[] = [];
+  private listenerUserMap: Map<string, User> = new Map();
+  private fetchedUserMap: Map<string, User> = new Map();
   private tournaments: Tournament[] = [];
+  private publicTournamentsMap: Map<string, Tournament> = new Map();
+  private fetchedTournamentsMap: Map<string, Tournament> = new Map();
+  private organizerTournamentsMap: Map<string, Tournament> = new Map();
+  private adminTournamentsMap: Map<string, Tournament> = new Map();
+  private completedTournamentsMap: Map<string, Tournament> = new Map();
   private tournamentPlayers: TournamentPlayer[] = [];
   private matches: Match[] = [];
   private tournamentGroups: TournamentGroup[] = [];
   private tournamentSessions: TournamentSession[] = [];
   private roundScores: PlayerRoundScore[] = [];
+  private registrationCodes: RegistrationCode[] = [];
   private organizerRequests: OrganizerRequest[] = [];
   private withdrawalRequests: WithdrawalRequest[] = [];
   private approvedOrganizerIds: string[] = DEFAULT_APPROVED_ORGANIZER_IDS;
@@ -160,6 +198,7 @@ export class DatabaseService {
   private userRegUnsubscribe: (() => void) | null = null;
   private activeUserDocUnsubscribe: (() => void) | null = null;
   private organizerWithdrawalsUnsub: (() => void) | null = null;
+  private organizerTournamentsUnsub: (() => void) | null = null;
   private adminListeners: (() => void)[] = [];
   private completedTournamentsLoaded: boolean = false;
   private fetchedUserIds: Set<string> = new Set();
@@ -173,11 +212,40 @@ export class DatabaseService {
       localStorage.removeItem('tc_admin_passcode');
     } catch {}
 
-    onAuthStateChanged(auth, () => {
+    // Restore cached active user ID and profile on initial boot
+    try {
+      if (typeof window !== 'undefined') {
+        const savedActiveId = localStorage.getItem(STORAGE_KEY_ACTIVE_USER);
+        if (savedActiveId) {
+          this.activeUserId = savedActiveId;
+          const cachedUserRaw = localStorage.getItem(`SG_USER_CACHE_${savedActiveId}`);
+          if (cachedUserRaw) {
+            const cachedUser = JSON.parse(cachedUserRaw);
+            if (cachedUser && cachedUser.id === savedActiveId) {
+              this.fetchedUserMap.set(savedActiveId, cachedUser);
+              this.rebuildUsers();
+            }
+          }
+          this.queueUserFetch(savedActiveId);
+        }
+      }
+    } catch (e) {
+      console.warn('Error restoring cached active user on boot:', e);
+    }
+
+    onAuthStateChanged(auth, async (fbUser) => {
       if (this.isFirebaseAdminAuthenticated()) {
         this.syncAdminListeners();
       } else {
         this.cleanupAdminListeners();
+        if (fbUser && !fbUser.uid.startsWith('tg_')) {
+          // Authenticated Google / public user restored by Firebase Auth
+          try {
+            await this.processGoogleUser(fbUser);
+          } catch (err) {
+            console.warn('Error syncing restored Google user on auth change:', err);
+          }
+        }
       }
       this.notify();
     });
@@ -185,20 +253,11 @@ export class DatabaseService {
     this.initRealtimeListeners();
   }
 
-  private loadUsersFromCache(): User[] {
-    return INITIAL_USERS.map((u) => {
-      try {
-        const saved = localStorage.getItem(`SG_USER_CACHE_${u.id}`);
-        if (saved) {
-          const cached = JSON.parse(saved);
-          return {
-            ...u,
-            ...cached,
-          };
-        }
-      } catch {}
-      return u;
-    });
+  private rebuildUsers() {
+    const combined = new Map<string, User>();
+    this.listenerUserMap.forEach((u, id) => combined.set(id, u));
+    this.fetchedUserMap.forEach((u, id) => combined.set(id, u));
+    this.users = Array.from(combined.values());
   }
 
   private mapTournamentDoc(docSnap: any): Tournament {
@@ -227,6 +286,8 @@ export class DatabaseService {
       maxRounds: typeof data.maxRounds === 'number' ? data.maxRounds : 3,
       isApproved: data.isApproved !== undefined ? Boolean(data.isApproved) : true,
       registrationFee: data.registrationFee || '50 ETB',
+      registrationMethod: (data.registrationMethod as RegistrationMethod) || (data.registrationFee && data.registrationFee !== 'Free' && data.registrationFee !== '0 ETB' && data.registrationFee !== '0' ? 'PAYMENT' : 'OPEN'),
+      registeredPlayersCount: typeof data.registeredPlayersCount === 'number' ? data.registeredPlayersCount : undefined,
       prizePool: data.prizePool || '',
       award: data.award || data.prizePool || '',
       telebirrNumber: data.telebirrNumber || '',
@@ -235,6 +296,8 @@ export class DatabaseService {
       performanceLabel: data.performanceLabel || 'Performance',
       sessionLabel: data.sessionLabel || 'Match',
       finalStandings: data.finalStandings || [],
+      youtubeVideoId: data.youtubeVideoId || undefined,
+      youtubeStreamUrl: data.youtubeStreamUrl || undefined,
     };
   }
 
@@ -257,6 +320,8 @@ export class DatabaseService {
         'https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?w=150',
       telegramUserId: data.telegramId ?? data.telegramUserId ?? cached.telegramUserId ?? `tg_${docSnap.id}`,
       role: (data.role as UserRole) ?? (cached.role as UserRole) ?? 'PLAYER',
+      firebaseAuthUid: data.firebaseAuthUid,
+      email: data.email,
       gamertag: data.gamertag ?? cached.gamertag ?? data.name ?? cached.name,
       favGame: data.favGame ?? cached.favGame ?? 'eFootball 2026',
       venueName: data.venueName ?? cached.venueName,
@@ -270,17 +335,23 @@ export class DatabaseService {
   }
 
   private mergeUsers(newUsers: User[]) {
-    const userMap = new Map<string, User>();
-    this.users.forEach((u) => userMap.set(u.id, u));
-    newUsers.forEach((u) => userMap.set(u.id, u));
-    this.users = Array.from(userMap.values());
+    newUsers.forEach((u) => this.fetchedUserMap.set(u.id, u));
+    this.rebuildUsers();
+  }
+
+  private rebuildTournaments() {
+    const combined = new Map<string, Tournament>();
+    this.completedTournamentsMap.forEach((t, id) => combined.set(id, t));
+    this.adminTournamentsMap.forEach((t, id) => combined.set(id, t));
+    this.organizerTournamentsMap.forEach((t, id) => combined.set(id, t));
+    this.publicTournamentsMap.forEach((t, id) => combined.set(id, t));
+    this.fetchedTournamentsMap.forEach((t, id) => combined.set(id, t));
+    this.tournaments = Array.from(combined.values());
   }
 
   private mergeTournaments(newTournaments: Tournament[]) {
-    const tourMap = new Map<string, Tournament>();
-    this.tournaments.forEach((t) => tourMap.set(t.id, t));
-    newTournaments.forEach((t) => tourMap.set(t.id, t));
-    this.tournaments = Array.from(tourMap.values());
+    newTournaments.forEach((t) => this.fetchedTournamentsMap.set(t.id, t));
+    this.rebuildTournaments();
   }
 
   private initRealtimeListeners() {
@@ -318,30 +389,37 @@ export class DatabaseService {
       }
     );
 
-    // 2. Listen to Active/Upcoming TOURNAMENTS collection
-    // Filters out historic completed tournaments from the hot real-time stream
-    const activeTournamentsQuery = query(
+    // 2. Listen to Bounded Public Feed of Active & Recent TOURNAMENTS
+    // Strictly bounded to the latest 25 tournaments to eliminate unbounded global downloads
+    const publicTournamentsQuery = query(
       collection(firestore, 'tournaments'),
-      where('status', 'in', ['Draft', 'Registration Open', 'Live', 'Upcoming', 'Ongoing'])
+      orderBy('createdAt', 'desc'),
+      limit(25)
     );
 
     const unsubTournaments = onSnapshot(
-      activeTournamentsQuery,
+      publicTournamentsQuery,
       (snapshot) => {
-        const activeTours = snapshot.docs.map((docSnap) => this.mapTournamentDoc(docSnap));
-        this.mergeTournaments(activeTours);
+        const publicTours = snapshot.docs.map((docSnap) => this.mapTournamentDoc(docSnap));
+        this.publicTournamentsMap = new Map(publicTours.map((t) => [t.id, t]));
+        this.rebuildTournaments();
         tournamentsLoaded = true;
         checkLoadingFinished();
         this.notify();
       },
       (err) => {
-        console.error('Error listening to active tournaments:', err);
-        // Fallback: load all tournaments if the composite filter index is missing
-        onSnapshot(
+        console.error('Error listening to public tournaments (orderBy createdAt desc limit 25):', err);
+        // Fallback: bounded query without orderBy if index is temporarily unavailable
+        const fallbackQuery = query(
           collection(firestore, 'tournaments'),
+          limit(25)
+        );
+        onSnapshot(
+          fallbackQuery,
           (snap) => {
-            const allTours = snap.docs.map((d) => this.mapTournamentDoc(d));
-            this.mergeTournaments(allTours);
+            const fallbackTours = snap.docs.map((d) => this.mapTournamentDoc(d));
+            this.publicTournamentsMap = new Map(fallbackTours.map((t) => [t.id, t]));
+            this.rebuildTournaments();
             tournamentsLoaded = true;
             checkLoadingFinished();
             this.notify();
@@ -358,19 +436,10 @@ export class DatabaseService {
     const usersQuery = query(collection(firestore, 'users'), limit(50));
     const unsubUsers = onSnapshot(
       usersQuery,
-      async (snapshot) => {
-        if (snapshot.empty && !usersLoaded) {
-          if (this.isFirebaseAdminAuthenticated()) {
-            await this.seedDemoData().catch((err) => console.error('Error seeding demo data:', err));
-          } else {
-            usersLoaded = true;
-            checkLoadingFinished();
-            this.notify();
-          }
-          return;
-        }
+      (snapshot) => {
         const userDocs = snapshot.docs.map((docSnap) => this.mapUserDoc(docSnap));
-        this.mergeUsers(userDocs);
+        this.listenerUserMap = new Map(userDocs.map((u) => [u.id, u]));
+        this.rebuildUsers();
         usersLoaded = true;
         checkLoadingFinished();
         this.notify();
@@ -404,6 +473,21 @@ export class DatabaseService {
     // Unsubscribe from previous tournament
     this.unsubscribeFromTournament();
     this.activeTournamentSubId = tournamentId;
+
+    // 0. Scoped Active TOURNAMENT DOCUMENT
+    const tourDocRef = doc(firestore, 'tournaments', tournamentId);
+    const unsubTourDoc = onSnapshot(
+      tourDocRef,
+      (snap) => {
+        if (snap.exists()) {
+          const updatedTour = this.mapTournamentDoc(snap);
+          this.fetchedTournamentsMap.set(updatedTour.id, updatedTour);
+          this.rebuildTournaments();
+          this.notify();
+        }
+      },
+      (err) => console.warn(`Error listening to active tournament doc ${tournamentId}:`, err)
+    );
 
     // 1. Scoped TOURNAMENT PLAYERS
     const playersQuery = query(
@@ -553,12 +637,47 @@ export class DatabaseService {
       (err) => console.error(`Error listening to roundScores for ${tournamentId}:`, err)
     );
 
+    // 7. Scoped REGISTRATION CODES
+    const codesQuery = query(
+      collection(firestore, 'registrationCodes'),
+      where('tournamentId', '==', tournamentId)
+    );
+    const unsubCodes = onSnapshot(
+      codesQuery,
+      (snapshot) => {
+        const newCodes: RegistrationCode[] = snapshot.docs.map((docSnap) => {
+          const data = docSnap.data();
+          return {
+            id: docSnap.id,
+            tournamentId: data.tournamentId,
+            code: data.code,
+            status: (data.status as RegistrationCodeStatus) || 'AVAILABLE',
+            batchId: data.batchId || '',
+            batchNumber: data.batchNumber || 1,
+            usedBy: data.usedBy || null,
+            usedByName: data.usedByName || null,
+            usedByGamertag: data.usedByGamertag || null,
+            usedAt: data.usedAt || null,
+            createdAt: data.createdAt || '',
+          };
+        });
+        const otherCodes = this.registrationCodes.filter((c) => c.tournamentId !== tournamentId);
+        const codeMap = new Map<string, RegistrationCode>();
+        newCodes.forEach((c) => codeMap.set(c.id, c));
+        this.registrationCodes = [...otherCodes, ...Array.from(codeMap.values())];
+        this.notify();
+      },
+      (err) => console.warn(`Error listening to registrationCodes for ${tournamentId}:`, err)
+    );
+
     this.tournamentUnsubscribers.push(
+      unsubTourDoc,
       unsubPlayers,
       unsubMatches,
       unsubGroups,
       unsubSessions,
-      unsubScores
+      unsubScores,
+      unsubCodes
     );
   }
 
@@ -578,7 +697,21 @@ export class DatabaseService {
   // ON-DEMAND COMPLETED TOURNAMENTS LOADER
   // =========================================================================
   public async loadCompletedTournaments(): Promise<void> {
-    if (this.completedTournamentsLoaded) return;
+    if (this.completedTournamentsLoaded) {
+      // Ensure all participant user profiles from completed tournaments in memory are cached
+      const existingCompleted = this.tournaments.filter(
+        (t) => (t.status === 'Completed' || t.status === 'Finished') && t.finalStandings
+      );
+      const participantIds = existingCompleted
+        .flatMap((t) => (t.finalStandings || []).map((s) => s.userId))
+        .filter((id): id is string => Boolean(id && typeof id === 'string' && !id.startsWith('demo_')));
+      const missingIds = participantIds.filter((id) => !this.users.some((u) => u.id === id));
+      if (missingIds.length > 0) {
+        await this.fetchUsersByIds(missingIds);
+      }
+      return;
+    }
+
     try {
       const q = query(
         collection(firestore, 'tournaments'),
@@ -586,8 +719,19 @@ export class DatabaseService {
       );
       const snapshot = await getDocs(q);
       const completed = snapshot.docs.map((d) => this.mapTournamentDoc(d));
-      this.mergeTournaments(completed);
+      completed.forEach((t) => this.completedTournamentsMap.set(t.id, t));
+      this.rebuildTournaments();
       this.completedTournamentsLoaded = true;
+
+      // Extract all participant IDs from finalStandings across completed tournaments and ensure profiles are cached
+      const participantIds = completed
+        .flatMap((t) => (t.finalStandings || []).map((s) => s.userId))
+        .filter((id): id is string => Boolean(id && typeof id === 'string' && !id.startsWith('demo_')));
+
+      if (participantIds.length > 0) {
+        await this.fetchUsersByIds(participantIds);
+      }
+
       this.notify();
     } catch (err) {
       console.warn('Error loading completed tournaments:', err);
@@ -776,10 +920,29 @@ export class DatabaseService {
         (err) => console.warn('Error listening to organizer withdrawal requests:', err)
       );
     }
+
+    // 4. Organizer-specific listener for their own tournaments
+    if (user.role === 'ORGANIZER' && !this.organizerTournamentsUnsub) {
+      const orgTournamentsQuery = query(
+        collection(firestore, 'tournaments'),
+        where('organizerId', '==', user.id),
+        limit(50)
+      );
+      this.organizerTournamentsUnsub = onSnapshot(
+        orgTournamentsQuery,
+        (snapshot) => {
+          const orgTours = snapshot.docs.map((docSnap) => this.mapTournamentDoc(docSnap));
+          this.organizerTournamentsMap = new Map(orgTours.map((t) => [t.id, t]));
+          this.rebuildTournaments();
+          this.notify();
+        },
+        (err) => console.warn('Error listening to organizer tournaments:', err)
+      );
+    }
   }
 
   // =========================================================================
-  // ADMIN-GATED LISTENERS (Organizer Requests, Withdrawals, Pending Payments)
+  // ADMIN-GATED LISTENERS (Organizer Requests, Withdrawals, Pending Payments, Admin Tournaments)
   // Only active when an authenticated admin is active in the session
   // =========================================================================
   public syncAdminListeners() {
@@ -872,7 +1035,24 @@ export class DatabaseService {
       (err) => console.warn('Admin pending payments listener error:', err)
     );
 
-    this.adminListeners.push(unsubOrgReqs, unsubWithdrawals, unsubPendingPayments);
+    // 4. Admin TOURNAMENTS (Pending & Recent for admin management)
+    const adminTournamentsQuery = query(
+      collection(firestore, 'tournaments'),
+      orderBy('createdAt', 'desc'),
+      limit(100)
+    );
+    const unsubAdminTournaments = onSnapshot(
+      adminTournamentsQuery,
+      (snapshot) => {
+        const adminTours = snapshot.docs.map((docSnap) => this.mapTournamentDoc(docSnap));
+        this.adminTournamentsMap = new Map(adminTours.map((t) => [t.id, t]));
+        this.rebuildTournaments();
+        this.notify();
+      },
+      (err) => console.warn('Admin tournaments listener error:', err)
+    );
+
+    this.adminListeners.push(unsubOrgReqs, unsubWithdrawals, unsubPendingPayments, unsubAdminTournaments);
   }
 
   public cleanupAdminListeners() {
@@ -884,6 +1064,8 @@ export class DatabaseService {
       });
       this.adminListeners = [];
     }
+    this.adminTournamentsMap.clear();
+    this.rebuildTournaments();
   }
 
   public subscribe(listener: () => void) {
@@ -900,9 +1082,16 @@ export class DatabaseService {
   }
 
   // =========================================================================
-  // SEED & RESET DEMO DATA IN FIRESTORE
+  // SEED & RESET DEMO DATA IN FIRESTORE (DEVELOPMENT / TEST ONLY)
   // =========================================================================
   public async seedDemoData(): Promise<void> {
+    // CRITICAL ARCHITECTURAL SAFETY GUARD:
+    // Production data is immutable during app lifecycle and updates.
+    // seedDemoData must NEVER run automatically or in production.
+    if (process.env.NODE_ENV === 'production') {
+      console.warn('[SECURITY] seedDemoData blocked: Production environment active.');
+      return;
+    }
     if (!auth.currentUser) {
       console.warn('Skipping seedDemoData: No active Firebase Auth user.');
       return;
@@ -1224,6 +1413,10 @@ export class DatabaseService {
         );
       }
 
+      try {
+        localStorage.setItem(`SG_USER_CACHE_${existingUser.id}`, JSON.stringify(existingUser));
+      } catch {}
+      this.mergeUsers([existingUser]);
       this.setActiveUserId(existingUser.id);
       return { isNewUser: false, roleGiven: role };
     } else {
@@ -1261,12 +1454,10 @@ export class DatabaseService {
         favGame: 'eFootball 2026',
       };
 
-      const existingIdx = this.users.findIndex((u) => u.id === newUserId);
-      if (existingIdx >= 0) {
-        this.users[existingIdx] = newUser;
-      } else {
-        this.users.push(newUser);
-      }
+      try {
+        localStorage.setItem(`SG_USER_CACHE_${newUserId}`, JSON.stringify(newUser));
+      } catch {}
+      this.mergeUsers([newUser]);
 
       setDoc(doc(firestore, 'users', newUserId), newUserDoc).catch((err) =>
         console.error('Failed to create new Telegram user in Firestore:', err)
@@ -1277,10 +1468,140 @@ export class DatabaseService {
     }
   }
 
+  public async processGoogleUser(fbUser: FirebaseUser): Promise<{ isNewUser: boolean; roleGiven: UserRole }> {
+    const googleUid = fbUser.uid;
+    const newUserId = `user_${googleUid}`;
+    
+    // Check if user is an approved organizer (unlikely for new google users, but honors approval records if mapped)
+    const isApproved = this.isApprovedOrganizer(googleUid);
+    const existingUser = this.users.find((u) => u.id === newUserId) || this.fetchedUserMap.get(newUserId);
+
+    if (existingUser) {
+      let role: UserRole = existingUser.role;
+      if (!isApproved && role === 'ORGANIZER') {
+        role = 'PLAYER';
+      } else if (!role) {
+        role = isApproved ? 'ORGANIZER' : 'PLAYER';
+      }
+
+      const updates: Record<string, any> = {};
+      const displayName = fbUser.displayName || (fbUser.email ? fbUser.email.split('@')[0] : `Player_${googleUid.slice(0, 5)}`);
+
+      if (!existingUser.name || existingUser.name === 'Competitor') {
+        updates.name = displayName;
+        existingUser.name = displayName;
+      }
+
+      if (fbUser.photoURL && (!existingUser.profileImage || existingUser.profileImage.includes('unsplash.com'))) {
+        updates.profilePhoto = fbUser.photoURL;
+        updates.profileImage = fbUser.photoURL;
+        existingUser.profileImage = fbUser.photoURL;
+      }
+
+      existingUser.role = role;
+
+      if (!this.isFirebaseAdminAuthenticated()) {
+        delete updates.role;
+        delete updates.isApproved;
+        delete updates.walletBalance;
+        delete updates.firebaseAuthUid;
+        delete updates.telegramUserId;
+        delete updates.organizerRequestStatus;
+      }
+
+      if (Object.keys(updates).length > 0) {
+        setDoc(doc(firestore, 'users', existingUser.id), updates, { merge: true }).catch((err) =>
+          console.error('Failed to sync Google user to Firestore:', err)
+        );
+      }
+
+      try {
+        localStorage.setItem(`SG_USER_CACHE_${existingUser.id}`, JSON.stringify(existingUser));
+      } catch {}
+      this.mergeUsers([existingUser]);
+      this.setActiveUserId(existingUser.id);
+      return { isNewUser: false, roleGiven: role };
+    } else {
+      const role: UserRole = isApproved ? 'ORGANIZER' : 'PLAYER';
+      const displayName = fbUser.displayName || (fbUser.email ? fbUser.email.split('@')[0] : `Player_${googleUid.slice(0, 5)}`);
+      const username = fbUser.email ? fbUser.email.split('@')[0].replace(/[^a-zA-Z0-9_]/g, '_') : `user_${googleUid.slice(0, 6)}`;
+      const profilePhoto = fbUser.photoURL || 'https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?w=150&auto=format&fit=crop&q=80';
+
+      const newUserDoc = {
+        name: displayName,
+        username: username,
+        profilePhoto: profilePhoto,
+        role: role,
+        createdAt: new Date().toISOString(),
+        id: newUserId,
+        gamertag: displayName,
+        profileImage: profilePhoto,
+        telegramUserId: '',
+        firebaseAuthUid: googleUid,
+        favGame: 'eFootball 2026',
+      };
+
+      const newUser: User = {
+        id: newUserId,
+        name: displayName,
+        username: username,
+        profileImage: profilePhoto,
+        telegramUserId: '',
+        role: role,
+        gamertag: displayName,
+        favGame: 'eFootball 2026',
+      };
+
+      try {
+        localStorage.setItem(`SG_USER_CACHE_${newUserId}`, JSON.stringify(newUser));
+      } catch {}
+      this.mergeUsers([newUser]);
+
+      setDoc(doc(firestore, 'users', newUserId), newUserDoc).catch((err) =>
+        console.error('Failed to create new Google user in Firestore:', err)
+      );
+
+      this.setActiveUserId(newUserId);
+      return { isNewUser: true, roleGiven: role };
+    }
+  }
+
   // ACTIVE USER MANAGEMENT (Fail-closed, strictly verified)
   public getActiveUser(): User | null {
+    if (!this.activeUserId) {
+      try {
+        if (typeof window !== 'undefined') {
+          const saved = localStorage.getItem(STORAGE_KEY_ACTIVE_USER);
+          if (saved) {
+            this.activeUserId = saved;
+          }
+        }
+      } catch {}
+    }
     if (!this.activeUserId) return null;
-    const user = this.users.find((u) => u.id === this.activeUserId);
+
+    let user = this.users.find((u) => u.id === this.activeUserId);
+    if (!user) {
+      user = this.fetchedUserMap.get(this.activeUserId);
+    }
+    if (!user) {
+      try {
+        if (typeof window !== 'undefined') {
+          const cachedRaw = localStorage.getItem(`SG_USER_CACHE_${this.activeUserId}`);
+          if (cachedRaw) {
+            const cached = JSON.parse(cachedRaw);
+            if (cached && cached.id === this.activeUserId) {
+              this.fetchedUserMap.set(cached.id, cached);
+              this.rebuildUsers();
+              user = cached;
+            }
+          }
+        }
+      } catch {}
+    }
+    if (!user) {
+      this.queueUserFetch(this.activeUserId);
+    }
     return user || null;
   }
 
@@ -1504,39 +1825,133 @@ export class DatabaseService {
     userId: string,
     paymentProofUrl: string
   ): Promise<boolean> {
-    const tournament = this.getTournamentById(tournamentId);
-    if (!tournament) return false;
+    try {
+      console.log('PAYMENT_DEBUG: [CHECKPOINT A] Tournament cache lookup START', { tournamentId });
+      const tournament = this.getTournamentById(tournamentId);
+      if (!tournament) {
+        console.warn('PAYMENT_DEBUG: FAIL tournament cache miss', {
+          tournamentId,
+          cachedTournamentsCount: this.tournaments.length,
+          cachedTournamentIds: this.tournaments.map(t => t.id),
+        });
+        return false;
+      }
+      console.log('PAYMENT_DEBUG: [CHECKPOINT A] Tournament found in memory cache', {
+        tournamentId: tournament.id,
+        tournamentName: tournament.tournamentName,
+      });
 
-    const currentPlayers = this.getTournamentPlayers(tournamentId);
-    if (currentPlayers.length >= tournament.maxPlayers) return false;
+      console.log('PAYMENT_DEBUG: [CHECKPOINT B] Tournament capacity check START');
+      const currentPlayers = this.getTournamentPlayers(tournamentId);
+      console.log('PAYMENT_DEBUG: [CHECKPOINT B] Capacity values', {
+        currentPlayersCount: currentPlayers.length,
+        maxPlayers: tournament.maxPlayers,
+      });
+      if (currentPlayers.length >= tournament.maxPlayers) {
+        console.warn('PAYMENT_DEBUG: FAIL tournament capacity check', {
+          currentPlayersCount: currentPlayers.length,
+          maxPlayers: tournament.maxPlayers,
+        });
+        return false;
+      }
 
-    const now = new Date();
-    const formattedDate = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(
-      now.getDate()
-    ).padStart(2, '0')} ${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
+      const now = new Date();
+      const formattedDate = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(
+        now.getDate()
+      ).padStart(2, '0')} ${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
 
-    const docId = `${tournamentId}_${userId}`;
-    const playerRef = doc(firestore, 'tournamentPlayers', docId);
+      const docId = `${tournamentId}_${userId}`;
+      const playerRef = doc(firestore, 'tournamentPlayers', docId);
 
-    let safeProof = paymentProofUrl;
-    if (safeProof && safeProof.startsWith('data:image/')) {
-      safeProof = await compressImage(safeProof, 600, 800, 0.6);
+      const rawProofLength = paymentProofUrl ? paymentProofUrl.length : 0;
+      console.log('PAYMENT_DEBUG: [CHECKPOINT C] Receipt pre-compression', {
+        startsWithDataImage: paymentProofUrl ? paymentProofUrl.startsWith('data:image/') : false,
+        rawProofLength,
+      });
+
+      let safeProof = paymentProofUrl;
+      if (safeProof && safeProof.startsWith('data:image/')) {
+        try {
+          safeProof = await compressImage(safeProof, 600, 800, 0.6);
+          console.log('PAYMENT_DEBUG: [CHECKPOINT D] Receipt compression completed', {
+            originalLength: rawProofLength,
+            compressedLength: safeProof.length,
+          });
+        } catch (compressErr) {
+          console.warn('PAYMENT_DEBUG: [CHECKPOINT D] Image compression fallback caught:', compressErr);
+        }
+      }
+
+      // Check for document size safety (Firestore limit is 1MB ~ 1,048,576 bytes)
+      if (safeProof && safeProof.length > 800000) {
+        console.error('PAYMENT_DEBUG: FAIL image size guard triggered', {
+          proofLength: safeProof.length,
+          maxAllowed: 800000,
+        });
+        throw new Error('Payment receipt image is too large. Please use a smaller screenshot.');
+      }
+
+      const isExistingInMemory = this.tournamentPlayers.some(
+        p => p.tournamentId === tournamentId && p.userId === userId
+      );
+
+      console.log('PAYMENT_DEBUG: [CHECKPOINT E] Pre-setDoc execution', {
+        tournamentId,
+        userId,
+        authUid: auth.currentUser?.uid || null,
+        isAnonymous: auth.currentUser?.isAnonymous ?? null,
+        isUidMatch: (auth.currentUser?.uid || null) === userId,
+        targetDocId: docId,
+        operationIntent: isExistingInMemory ? 'UPDATE' : 'CREATE',
+        payloadFields: [
+          'tournamentId',
+          'userId',
+          'status',
+          'joinedAt',
+          'registrationDate',
+          'playerStatus',
+          'paymentStatus',
+          'paymentProofUrl',
+          'paymentSubmittedAt',
+          'seed',
+        ],
+      });
+
+      await setDoc(playerRef, {
+        tournamentId,
+        userId,
+        status: 'Registered',
+        joinedAt: formattedDate,
+        registrationDate: formattedDate,
+        playerStatus: 'Registered',
+        paymentStatus: 'PENDING_APPROVAL',
+        paymentProofUrl: safeProof,
+        paymentSubmittedAt: formattedDate,
+        seed: currentPlayers.length + 1,
+      });
+
+      console.log('PAYMENT_DEBUG: FIRESTORE WRITE SUCCESS', {
+        docId,
+        tournamentId,
+        userId,
+        paymentStatus: 'PENDING_APPROVAL',
+      });
+
+      return true;
+    } catch (err: any) {
+      console.error('PAYMENT_DEBUG: [CHECKPOINT F] setDoc execution EXCEPTION', {
+        errorName: err?.name,
+        errorCode: err?.code,
+        errorMessage: err?.message,
+        tournamentId,
+        userId,
+        authUid: auth.currentUser?.uid || null,
+      });
+      if (err instanceof Error && err.message.includes('too large')) {
+        throw err;
+      }
+      return false;
     }
-
-    await setDoc(playerRef, {
-      tournamentId,
-      userId,
-      status: 'Registered',
-      joinedAt: formattedDate,
-      registrationDate: formattedDate,
-      playerStatus: 'Registered',
-      paymentStatus: 'PENDING_APPROVAL',
-      paymentProofUrl: safeProof,
-      paymentSubmittedAt: formattedDate,
-      seed: currentPlayers.length + 1,
-    });
-
-    return true;
   }
 
   public async updatePaymentStatus(
@@ -1797,15 +2212,39 @@ export class DatabaseService {
 
   public async deleteUser(userId: string): Promise<void> {
     const user = this.users.find((u) => u.id === userId);
-    if (user) {
-      const cleanTgId = user.telegramUserId.replace(/^tg_/, '');
-      await deleteDoc(doc(firestore, 'approvedOrganizers', cleanTgId)).catch(() => {});
+    if (user && user.telegramUserId) {
+      const cleanTgId = user.telegramUserId.replace(/^user_tg_/, '').replace(/^user_/, '').replace(/^tg_/, '').trim();
+      if (cleanTgId) {
+        await deleteDoc(doc(firestore, 'approvedOrganizers', cleanTgId)).catch(() => {});
+      }
     }
     await deleteDoc(doc(firestore, 'users', userId));
+
+    // Comprehensive in-memory, cache, and state cleanup
+    this.listenerUserMap.delete(userId);
+    this.fetchedUserMap.delete(userId);
+    this.fetchedUserIds.delete(userId);
+    this.rebuildUsers();
+
+    try {
+      localStorage.removeItem(`SG_USER_CACHE_${userId}`);
+    } catch {}
+
+    if (this.activeUserId === userId) {
+      this.setActiveUserId(null);
+    }
+
+    this.notify();
   }
 
   public async deleteTournament(tournamentId: string): Promise<void> {
     await deleteDoc(doc(firestore, 'tournaments', tournamentId));
+    this.publicTournamentsMap.delete(tournamentId);
+    this.fetchedTournamentsMap.delete(tournamentId);
+    this.organizerTournamentsMap.delete(tournamentId);
+    this.adminTournamentsMap.delete(tournamentId);
+    this.completedTournamentsMap.delete(tournamentId);
+    this.rebuildTournaments();
     const players = this.tournamentPlayers.filter((tp) => tp.tournamentId === tournamentId);
     for (const p of players) {
       await deleteDoc(doc(firestore, 'tournamentPlayers', `${tournamentId}_${p.userId}`)).catch(() => {});
@@ -1814,14 +2253,30 @@ export class DatabaseService {
     for (const m of matches) {
       await deleteDoc(doc(firestore, 'matches', m.id)).catch(() => {});
     }
+    this.notify();
+  }
+
+  public getAdminExpectedUid(): string {
+    const adminUser = this.users.find((u) => u.id === 'admin_1' || u.role === 'ADMIN');
+    if (adminUser?.firebaseAuthUid) {
+      return adminUser.firebaseAuthUid;
+    }
+    return 'WXyun7S9mIOZuBw6gEHFsSlN8fH3';
   }
 
   private currentLoginAttemptId: number = 0;
 
-  public async loginAdminWithFirebase(email: string, pass: string): Promise<boolean> {
+  public async loginAdminWithFirebase(email: string, pass: string): Promise<AdminLoginResult> {
     const attemptId = ++this.currentLoginAttemptId;
+    const previousUser = auth.currentUser;
+    const previousSessionPresent = !!previousUser;
+    const providerIds = previousUser ? previousUser.providerData.map((p) => p.providerId) : [];
+
     try {
-      console.log('[ADMIN LOGIN] Firebase signIn started, attempt =', attemptId);
+      console.log('[ADMIN LOGIN] Firebase signIn started, attempt =', attemptId, {
+        previousSessionPresent,
+        providerIds,
+      });
       const signInPromise = signInWithEmailAndPassword(auth, email.trim(), pass);
 
       // Guard against late Firebase resolution after timeout or cancellation
@@ -1841,21 +2296,65 @@ export class DatabaseService {
         .catch(() => {});
 
       const timeoutPromise = new Promise<never>((_, reject) =>
-        setTimeout(() => reject(new Error('Sign in request timed out.')), 15000)
+        setTimeout(() => {
+          const timeoutErr: any = new Error('Sign in request timed out.');
+          timeoutErr.code = 'auth/timeout';
+          reject(timeoutErr);
+        }, 15000)
       );
 
       const userCredential = await Promise.race([signInPromise, timeoutPromise]);
       if (this.currentLoginAttemptId !== attemptId) {
         // Attempt was superseded or cancelled
         await signOut(auth).catch(() => {});
-        return false;
+        return {
+          success: false,
+          errorCode: 'auth/cancelled',
+          errorMessage: 'Login attempt was superseded or cancelled.',
+          previousSessionPresent,
+          providerIds,
+        };
       }
 
       const fbUser = userCredential.user;
       if (!fbUser) {
         console.log('[ADMIN LOGIN] Firebase signIn failed: user is null');
-        return false;
+        return {
+          success: false,
+          errorCode: 'auth/null-user',
+          errorMessage: 'Firebase authentication returned an empty user.',
+          previousSessionPresent,
+          providerIds,
+        };
       }
+
+      const expectedAdminUid = this.getAdminExpectedUid();
+      const isUidMatch = fbUser.uid === expectedAdminUid;
+      const userProviderIds = fbUser.providerData.map((p) => p.providerId);
+
+      console.log('[ADMIN LOGIN] authenticated UID:', fbUser.uid);
+      console.log('[ADMIN LOGIN] provider IDs:', userProviderIds);
+      console.log('[ADMIN LOGIN] admin UID match:', isUidMatch);
+
+      if (!isUidMatch) {
+        console.error('[ADMIN LOGIN] Authenticated user is not authorized as Admin:', {
+          authenticatedUid: fbUser.uid,
+          expectedAdminUid,
+        });
+        try {
+          if (typeof window !== 'undefined') {
+            localStorage.removeItem('tc_admin_session_v2');
+          }
+        } catch {}
+        return {
+          success: false,
+          errorCode: 'auth/unauthorized-admin',
+          errorMessage: 'You are authenticated, but this account is not authorized for Admin Control Portal access.',
+          previousSessionPresent,
+          providerIds: userProviderIds,
+        };
+      }
+
       console.log('[ADMIN LOGIN] Firebase signIn succeeded, UID =', fbUser.uid);
 
       // Immediately establish session metadata so validateAdminSession does not treat this as stale
@@ -1877,9 +2376,23 @@ export class DatabaseService {
 
       console.log('[ADMIN LOGIN] login complete');
       this.notify();
-      return true;
+      return {
+        success: true,
+        user: fbUser,
+        previousSessionPresent,
+        providerIds: userProviderIds,
+      };
     } catch (err: any) {
-      console.error('[ADMIN LOGIN] login failed =', err?.message || err);
+      const errorCode = err?.code || 'auth/unknown';
+      const errorMessage = err?.message || String(err);
+
+      console.error('[ADMIN LOGIN] Firebase error code =', errorCode);
+      console.error('[ADMIN LOGIN] Firebase error message =', errorMessage);
+      console.error('[ADMIN LOGIN] diagnostic context =', {
+        previousSessionPresent,
+        providerIds,
+      });
+
       // Invalidate attempt ID so any late resolution is rejected
       if (this.currentLoginAttemptId === attemptId) {
         this.currentLoginAttemptId++;
@@ -1888,10 +2401,15 @@ export class DatabaseService {
         if (typeof window !== 'undefined') {
           localStorage.removeItem('tc_admin_session_v2');
         }
-        await signOut(auth).catch(() => {});
       } catch {}
       this.notify();
-      return false;
+      return {
+        success: false,
+        errorCode,
+        errorMessage,
+        previousSessionPresent,
+        providerIds,
+      };
     }
   }
 
@@ -1904,7 +2422,10 @@ export class DatabaseService {
           sessionStorage.removeItem('tc_admin_last_activity_at');
         } catch {}
       }
-      await signOut(auth);
+      // ONLY sign out Firebase Auth if the active session is genuinely the Admin session
+      if (this.isFirebaseAdminAuthenticated()) {
+        await signOut(auth);
+      }
     } catch (err) {
       console.error('Firebase signOut error:', err);
     }
@@ -1914,8 +2435,40 @@ export class DatabaseService {
   public isFirebaseAdminAuthenticated(): boolean {
     const user = auth.currentUser;
     if (!user) return false;
-    // Admin uses Email/Password authentication (has email or non-tg UID)
-    return !!user.email || (!!user.uid && !user.uid.startsWith('tg_'));
+
+    // Reject Telegram custom-token sessions (tg_*)
+    if (user.uid.startsWith('tg_')) return false;
+
+    // Must match the authorized Admin Firebase UID
+    const expectedAdminUid = this.getAdminExpectedUid();
+    if (user.uid !== expectedAdminUid) {
+      return false;
+    }
+
+    // Must have the Password provider OR an active validated Admin session metadata matching the admin UID
+    const hasPasswordProvider = user.providerData && user.providerData.some((p) => p.providerId === 'password');
+    let hasAdminSession = false;
+    try {
+      if (typeof window !== 'undefined') {
+        const raw = localStorage.getItem('tc_admin_session_v2');
+        if (raw) {
+          const parsed = JSON.parse(raw);
+          if (
+            parsed &&
+            parsed.adminUid === user.uid &&
+            parsed.adminUid === expectedAdminUid &&
+            typeof parsed.sessionStartedAt === 'number' &&
+            typeof parsed.lastActivityAt === 'number' &&
+            Date.now() - parsed.lastActivityAt < 30 * 60 * 1000 &&
+            Date.now() - parsed.sessionStartedAt < 12 * 60 * 60 * 1000
+          ) {
+            hasAdminSession = true;
+          }
+        }
+      }
+    } catch {}
+
+    return hasPasswordProvider || hasAdminSession;
   }
 
   public getAdminAuthUser(): FirebaseUser | null {
@@ -1962,6 +2515,25 @@ export class DatabaseService {
 
   public getTournamentById(id: string): Tournament | undefined {
     return this.tournaments.find((t) => t.id === id);
+  }
+
+  public async fetchTournamentById(id: string): Promise<Tournament | null> {
+    if (!id) return null;
+    const cached = this.getTournamentById(id);
+    if (cached) return cached;
+    try {
+      const docSnap = await getDoc(doc(firestore, 'tournaments', id));
+      if (docSnap.exists()) {
+        const tour = this.mapTournamentDoc(docSnap);
+        this.fetchedTournamentsMap.set(tour.id, tour);
+        this.rebuildTournaments();
+        this.notify();
+        return tour;
+      }
+    } catch (err) {
+      console.warn(`Error fetching tournament ${id}:`, err);
+    }
+    return null;
   }
 
   public getTournamentByStartParam(startParam: string): Tournament | undefined {
@@ -2034,6 +2606,316 @@ export class DatabaseService {
         t.id.includes(cleanParam) ||
         (t.tournamentCode && (cleanParam.includes(t.tournamentCode) || t.tournamentCode.includes(cleanParam)))
     );
+  }
+
+  public async fetchTournamentByStartParam(startParam: string): Promise<Tournament | null> {
+    if (!startParam || typeof startParam !== 'string') return null;
+    const cleanParam = decodeURIComponent(startParam).trim();
+    if (!cleanParam) return null;
+
+    const cached = this.getTournamentByStartParam(startParam);
+    if (cached) return cached;
+
+    try {
+      // 1. Try direct doc ID
+      const directDoc = await getDoc(doc(firestore, 'tournaments', cleanParam));
+      if (directDoc.exists()) {
+        const tour = this.mapTournamentDoc(directDoc);
+        this.fetchedTournamentsMap.set(tour.id, tour);
+        this.rebuildTournaments();
+        this.notify();
+        return tour;
+      }
+
+      // 2. Try tournamentCode match
+      const codeParam = cleanParam.replace(/^#/, '').trim();
+      const codeQuery = query(
+        collection(firestore, 'tournaments'),
+        where('tournamentCode', '==', codeParam),
+        limit(1)
+      );
+      const codeSnap = await getDocs(codeQuery);
+      if (!codeSnap.empty) {
+        const tour = this.mapTournamentDoc(codeSnap.docs[0]);
+        this.fetchedTournamentsMap.set(tour.id, tour);
+        this.rebuildTournaments();
+        this.notify();
+        return tour;
+      }
+    } catch (err) {
+      console.warn('Error fetching tournament by start param:', err);
+    }
+    return null;
+  }
+
+  // =========================================================================
+  // CURSOR-BASED FIRESTORE PAGINATION METHODS
+  // =========================================================================
+
+  /**
+   * Paginated user fetching directly from Firestore with cursor support.
+   * Enables browsing arbitrary user directories without unbounded memory downloads.
+   */
+  public async getPaginatedUsers(options: {
+    pageSize?: number;
+    lastDoc?: QueryDocumentSnapshot | DocumentSnapshot | null;
+    role?: UserRole | 'ALL';
+    searchTerm?: string;
+  }): Promise<{
+    users: User[];
+    lastDoc: QueryDocumentSnapshot | null;
+    hasMore: boolean;
+    totalCount?: number;
+  }> {
+    const { pageSize = 15, lastDoc = null, role = 'ALL', searchTerm = '' } = options;
+
+    try {
+      let q = query(collection(firestore, 'users'));
+
+      if (role && role !== 'ALL') {
+        q = query(q, where('role', '==', role));
+      }
+
+      q = query(q, orderBy('createdAt', 'desc'), limit(pageSize + 1));
+
+      if (lastDoc) {
+        q = query(q, startAfter(lastDoc));
+      }
+
+      const snapshot = await getDocs(q);
+      const docs = snapshot.docs;
+      const hasMore = docs.length > pageSize;
+      const resultDocs = hasMore ? docs.slice(0, pageSize) : docs;
+      const users = resultDocs.map((d) => this.mapUserDoc(d));
+
+      // Cache returned users in listenerUserMap to keep synchronous lookups fast
+      for (const u of users) {
+        this.listenerUserMap.set(u.id, u);
+      }
+      this.rebuildUsers();
+
+      // Client-side search refinement if term is provided
+      let filteredUsers = users;
+      if (searchTerm.trim()) {
+        const term = searchTerm.toLowerCase().trim();
+        filteredUsers = users.filter(
+          (u) =>
+            u.name.toLowerCase().includes(term) ||
+            u.username.toLowerCase().includes(term) ||
+            (u.telegramUserId && String(u.telegramUserId).toLowerCase().includes(term)) ||
+            (u.gamertag && u.gamertag.toLowerCase().includes(term))
+        );
+      }
+
+      const nextLastDoc = resultDocs.length > 0 ? resultDocs[resultDocs.length - 1] : null;
+
+      return {
+        users: filteredUsers,
+        lastDoc: nextLastDoc,
+        hasMore,
+      };
+    } catch (err) {
+      console.warn('Firestore getPaginatedUsers fallback to local cache:', err);
+      // Fallback to local memory filter
+      let localUsers = this.getUsers();
+      if (role && role !== 'ALL') {
+        localUsers = localUsers.filter((u) => u.role === role);
+      }
+      if (searchTerm.trim()) {
+        const term = searchTerm.toLowerCase().trim();
+        localUsers = localUsers.filter(
+          (u) =>
+            u.name.toLowerCase().includes(term) ||
+            u.username.toLowerCase().includes(term) ||
+            (u.telegramUserId && String(u.telegramUserId).toLowerCase().includes(term)) ||
+            (u.gamertag && u.gamertag.toLowerCase().includes(term))
+        );
+      }
+      return {
+        users: localUsers.slice(0, pageSize),
+        lastDoc: null,
+        hasMore: localUsers.length > pageSize,
+        totalCount: localUsers.length,
+      };
+    }
+  }
+
+  /**
+   * Paginated tournament fetching directly from Firestore with cursor support.
+   */
+  public async getPaginatedTournaments(options: {
+    pageSize?: number;
+    lastDoc?: QueryDocumentSnapshot | DocumentSnapshot | null;
+    status?: string;
+    game?: string;
+    organizerId?: string;
+    isApproved?: boolean;
+    searchTerm?: string;
+  }): Promise<{
+    tournaments: Tournament[];
+    lastDoc: QueryDocumentSnapshot | null;
+    hasMore: boolean;
+  }> {
+    const { pageSize = 10, lastDoc = null, status, game, organizerId, isApproved, searchTerm = '' } = options;
+
+    try {
+      let q = query(collection(firestore, 'tournaments'));
+
+      if (isApproved !== undefined) {
+        q = query(q, where('isApproved', '==', isApproved));
+      }
+      if (status && status !== 'ALL') {
+        q = query(q, where('status', '==', status));
+      }
+      if (game && game !== 'ALL') {
+        q = query(q, where('game', '==', game));
+      }
+      if (organizerId) {
+        q = query(q, where('organizerId', '==', organizerId));
+      }
+
+      q = query(q, orderBy('createdAt', 'desc'), limit(pageSize + 1));
+
+      if (lastDoc) {
+        q = query(q, startAfter(lastDoc));
+      }
+
+      const snapshot = await getDocs(q);
+      const docs = snapshot.docs;
+      const hasMore = docs.length > pageSize;
+      const resultDocs = hasMore ? docs.slice(0, pageSize) : docs;
+      const tournaments = resultDocs.map((d) => this.mapTournamentDoc(d));
+
+      this.mergeTournaments(tournaments);
+
+      let filteredTournaments = tournaments;
+      if (searchTerm.trim()) {
+        const qTerm = searchTerm.toLowerCase().trim();
+        filteredTournaments = tournaments.filter((t) => {
+          const matchName = t.tournamentName.toLowerCase().includes(qTerm);
+          const matchGame = t.game.toLowerCase().includes(qTerm);
+          const matchVenue = (t.venueName || '').toLowerCase().includes(qTerm);
+          const matchLoc = (t.venueLocation || '').toLowerCase().includes(qTerm);
+          const matchCode = t.tournamentCode ? t.tournamentCode.toLowerCase().includes(qTerm) || `#${t.tournamentCode}`.toLowerCase().includes(qTerm) : false;
+          return matchName || matchGame || matchVenue || matchLoc || matchCode;
+        });
+      }
+
+      const nextLastDoc = resultDocs.length > 0 ? resultDocs[resultDocs.length - 1] : null;
+
+      return {
+        tournaments: filteredTournaments,
+        lastDoc: nextLastDoc,
+        hasMore,
+      };
+    } catch (err) {
+      console.warn('Firestore getPaginatedTournaments fallback to local cache:', err);
+      let localTours = this.getTournaments();
+      if (isApproved !== undefined) {
+        localTours = localTours.filter((t) => t.isApproved === isApproved);
+      }
+      if (status && status !== 'ALL') {
+        localTours = localTours.filter((t) => t.status === status);
+      }
+      if (game && game !== 'ALL') {
+        localTours = localTours.filter((t) => t.game === game);
+      }
+      if (organizerId) {
+        localTours = localTours.filter((t) => t.organizerId === organizerId);
+      }
+      if (searchTerm.trim()) {
+        const qTerm = searchTerm.toLowerCase().trim();
+        localTours = localTours.filter((t) => {
+          const matchName = t.tournamentName.toLowerCase().includes(qTerm);
+          const matchGame = t.game.toLowerCase().includes(qTerm);
+          const matchVenue = (t.venueName || '').toLowerCase().includes(qTerm);
+          const matchLoc = (t.venueLocation || '').toLowerCase().includes(qTerm);
+          const matchCode = t.tournamentCode ? t.tournamentCode.toLowerCase().includes(qTerm) || `#${t.tournamentCode}`.toLowerCase().includes(qTerm) : false;
+          return matchName || matchGame || matchVenue || matchLoc || matchCode;
+        });
+      }
+      return {
+        tournaments: localTours.slice(0, pageSize),
+        lastDoc: null,
+        hasMore: localTours.length > pageSize,
+      };
+    }
+  }
+
+  /**
+   * Paginated withdrawal requests fetching directly from Firestore.
+   */
+  public async getPaginatedWithdrawalRequests(options: {
+    pageSize?: number;
+    lastDoc?: QueryDocumentSnapshot | DocumentSnapshot | null;
+    organizerId?: string;
+    status?: string;
+  }): Promise<{
+    requests: WithdrawalRequest[];
+    lastDoc: QueryDocumentSnapshot | null;
+    hasMore: boolean;
+  }> {
+    const { pageSize = 10, lastDoc = null, organizerId, status } = options;
+
+    try {
+      let q = query(collection(firestore, 'withdrawalRequests'));
+
+      if (organizerId) {
+        q = query(q, where('organizerId', '==', organizerId));
+      }
+      if (status && status !== 'ALL') {
+        q = query(q, where('status', '==', status));
+      }
+
+      q = query(q, orderBy('requestedAt', 'desc'), limit(pageSize + 1));
+
+      if (lastDoc) {
+        q = query(q, startAfter(lastDoc));
+      }
+
+      const snapshot = await getDocs(q);
+      const docs = snapshot.docs;
+      const hasMore = docs.length > pageSize;
+      const resultDocs = hasMore ? docs.slice(0, pageSize) : docs;
+
+      const requests: WithdrawalRequest[] = resultDocs.map((d) => {
+        const data = d.data();
+        return {
+          id: d.id,
+          organizerId: data.organizerId || '',
+          organizerName: data.organizerName || '',
+          amount: data.amount || 0,
+          telebirrName: data.telebirrName || '',
+          telebirrNumber: data.telebirrNumber || '',
+          reason: data.reason || '',
+          status: data.status || 'Pending Approval',
+          requestedAt: data.requestedAt || new Date().toISOString(),
+          processedAt: data.processedAt,
+        };
+      });
+
+      const nextLastDoc = resultDocs.length > 0 ? resultDocs[resultDocs.length - 1] : null;
+
+      return {
+        requests,
+        lastDoc: nextLastDoc,
+        hasMore,
+      };
+    } catch (err) {
+      console.warn('Firestore getPaginatedWithdrawalRequests fallback:', err);
+      let localReqs = this.getWithdrawalRequests();
+      if (organizerId) {
+        localReqs = localReqs.filter((r) => r.organizerId === organizerId);
+      }
+      if (status && status !== 'ALL') {
+        localReqs = localReqs.filter((r) => r.status === status);
+      }
+      return {
+        requests: localReqs.slice(0, pageSize),
+        lastDoc: null,
+        hasMore: localReqs.length > pageSize,
+      };
+    }
   }
 
   public async approveTournament(
@@ -2395,6 +3277,8 @@ export class DatabaseService {
       currentStage,
       isApproved,
       registrationFee: data.registrationFee || 'Free',
+      registrationMethod: data.registrationMethod || (data.registrationFee && data.registrationFee !== 'Free' ? 'PAYMENT' : 'OPEN'),
+      registeredPlayersCount: 0,
       telebirrNumber: data.telebirrNumber || '',
       telebirrAccountName: data.telebirrAccountName || data.telebirrName || '',
       telebirrName: data.telebirrName || data.telebirrAccountName || '',
@@ -2425,12 +3309,18 @@ export class DatabaseService {
       currentStage,
       isApproved,
       registrationFee: data.registrationFee || 'Free',
+      registrationMethod: newTournament.registrationMethod,
+      registeredPlayersCount: 0,
       award: data.award || data.prizePool || '',
       telebirrNumber: data.telebirrNumber || '',
       telebirrAccountName: data.telebirrAccountName || data.telebirrName || '',
       telebirrName: data.telebirrName || data.telebirrAccountName || '',
+      youtubeVideoId: data.youtubeVideoId || '',
+      youtubeStreamUrl: data.youtubeStreamUrl || '',
     });
 
+    this.mergeTournaments([newTournament]);
+    this.notify();
     return newTournament;
   }
 
@@ -2444,6 +3334,13 @@ export class DatabaseService {
       payload.name = updates.tournamentName;
     }
     await updateDoc(ref, payload);
+    const existing = this.getTournamentById(id);
+    if (existing) {
+      const merged: Tournament = { ...existing, ...updates };
+      this.fetchedTournamentsMap.set(id, merged);
+      this.rebuildTournaments();
+      this.notify();
+    }
   }
 
   public async updateTournamentStatus(id: string, status: TournamentStatus): Promise<void> {
@@ -2929,12 +3826,19 @@ export class DatabaseService {
 
   // TABLE 3: TOURNAMENT PLAYERS
   public getTournamentPlayers(tournamentId: string): (TournamentPlayer & { user?: User })[] {
-    return this.tournamentPlayers
-      .filter((tp) => tp.tournamentId === tournamentId)
-      .map((tp) => ({
-        ...tp,
-        user: this.getUserById(tp.userId),
-      }));
+    const list = this.tournamentPlayers.filter((tp) => tp.tournamentId === tournamentId);
+    const seen = new Set<string>();
+    const unique: TournamentPlayer[] = [];
+    for (const tp of list) {
+      if (!seen.has(tp.userId)) {
+        seen.add(tp.userId);
+        unique.push(tp);
+      }
+    }
+    return unique.map((tp) => ({
+      ...tp,
+      user: this.getUserById(tp.userId),
+    }));
   }
 
   public getConfirmedTournamentPlayers(tournamentId: string): (TournamentPlayer & { user?: User })[] {
@@ -2974,18 +3878,354 @@ export class DatabaseService {
     const docId = `${tournamentId}_${userId}`;
     const playerRef = doc(firestore, 'tournamentPlayers', docId);
 
-    await setDoc(playerRef, {
+    const newTp: TournamentPlayer = {
       tournamentId,
       userId,
-      status: 'Registered',
-      joinedAt: formattedDate,
       registrationDate: formattedDate,
       playerStatus: 'Registered',
       paymentStatus: 'CONFIRMED',
+      registrationMethod: 'OPEN',
       seed: this.getTournamentPlayers(tournamentId).length + 1,
+      checkInCode: `SG-${userId ? userId.slice(-4).toUpperCase() : '1001'}`,
+    };
+
+    await setDoc(playerRef, {
+      ...newTp,
+      status: 'Registered',
+      joinedAt: formattedDate,
     });
 
+    // Update in-memory state
+    this.tournamentPlayers = [
+      ...this.tournamentPlayers.filter((p) => !(p.tournamentId === tournamentId && p.userId === userId)),
+      newTp,
+    ];
+
+    if (typeof tournament.registeredPlayersCount === 'number') {
+      tournament.registeredPlayersCount += 1;
+      updateDoc(doc(firestore, 'tournaments', tournamentId), {
+        registeredPlayersCount: tournament.registeredPlayersCount,
+      }).catch(() => {});
+    }
+
+    this.notify();
     return true;
+  }
+
+  // =========================================================================
+  // REGISTRATION CODES (ADDITIVE ACCESS METHOD)
+  // =========================================================================
+  public getRegistrationCodes(tournamentId: string): RegistrationCode[] {
+    const raw = this.registrationCodes.filter((c) => c.tournamentId === tournamentId);
+    const seen = new Set<string>();
+    const unique: RegistrationCode[] = [];
+    for (const c of raw) {
+      if (!seen.has(c.id)) {
+        seen.add(c.id);
+        unique.push(c);
+      }
+    }
+    return unique;
+  }
+
+  public async fetchRegistrationCodes(tournamentId: string): Promise<RegistrationCode[]> {
+    try {
+      const q = query(
+        collection(firestore, 'registrationCodes'),
+        where('tournamentId', '==', tournamentId)
+      );
+      const snap = await getDocs(q);
+      const fetched: RegistrationCode[] = snap.docs.map((docSnap) => {
+        const data = docSnap.data();
+        return {
+          id: docSnap.id,
+          tournamentId: data.tournamentId,
+          code: data.code,
+          status: (data.status as RegistrationCodeStatus) || 'AVAILABLE',
+          batchId: data.batchId || '',
+          batchNumber: data.batchNumber || 1,
+          usedBy: data.usedBy || null,
+          usedByName: data.usedByName || null,
+          usedByGamertag: data.usedByGamertag || null,
+          usedAt: data.usedAt || null,
+          createdAt: data.createdAt || '',
+        };
+      });
+
+      const other = this.registrationCodes.filter((c) => c.tournamentId !== tournamentId);
+      const codeMap = new Map<string, RegistrationCode>();
+      fetched.forEach((c) => codeMap.set(c.id, c));
+      this.registrationCodes = [...other, ...Array.from(codeMap.values())];
+      this.notify();
+      return Array.from(codeMap.values());
+    } catch (err) {
+      console.error(`Error fetching registration codes for ${tournamentId}:`, err);
+      return this.getRegistrationCodes(tournamentId);
+    }
+  }
+
+  public async generateRegistrationCodes(
+    tournamentId: string,
+    count: number
+  ): Promise<{ batchId: string; batchNumber: number; codes: RegistrationCode[] }> {
+    const safeCount = Math.max(1, Math.min(count, 300));
+    const CODE_CHARS = '23456789ABCDEFGHJKLMNPQRSTUVWXYZ';
+
+    // 1. Fetch current codes to avoid collision & calculate next batch index
+    await this.fetchRegistrationCodes(tournamentId);
+    const existingForTour = this.registrationCodes.filter((c) => c.tournamentId === tournamentId);
+    const existingCodeSet = new Set(existingForTour.map((c) => c.code));
+    const maxBatchNum = existingForTour.reduce((max, c) => Math.max(max, c.batchNumber || 1), 0);
+    const batchNumber = existingForTour.length === 0 ? 1 : maxBatchNum + 1;
+    const batchId = `batch_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+
+    const now = new Date();
+    const formattedDate = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(
+      now.getDate()
+    ).padStart(2, '0')} ${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
+
+    const generatedCodes: RegistrationCode[] = [];
+    const generatedCodeSet = new Set<string>();
+
+    while (generatedCodes.length < safeCount) {
+      const array = new Uint8Array(6);
+      if (typeof crypto !== 'undefined' && crypto.getRandomValues) {
+        crypto.getRandomValues(array);
+      } else {
+        for (let i = 0; i < 6; i++) {
+          array[i] = Math.floor(Math.random() * 256);
+        }
+      }
+      let codeStr = '';
+      for (let i = 0; i < 6; i++) {
+        codeStr += CODE_CHARS[array[i] % CODE_CHARS.length];
+      }
+
+      if (!existingCodeSet.has(codeStr) && !generatedCodeSet.has(codeStr)) {
+        generatedCodeSet.add(codeStr);
+        const codeObj: RegistrationCode = {
+          id: `${tournamentId}_${codeStr}`,
+          tournamentId,
+          code: codeStr,
+          status: 'AVAILABLE',
+          batchId,
+          batchNumber,
+          usedBy: null,
+          usedByName: null,
+          usedByGamertag: null,
+          usedAt: null,
+          createdAt: formattedDate,
+        };
+        generatedCodes.push(codeObj);
+      }
+    }
+
+    // 2. Commit batch to Firestore in chunks of up to 450 items
+    const chunkSize = 450;
+    for (let i = 0; i < generatedCodes.length; i += chunkSize) {
+      const chunk = generatedCodes.slice(i, i + chunkSize);
+      const batch = writeBatch(firestore);
+      for (const c of chunk) {
+        const codeRef = doc(firestore, 'registrationCodes', c.id);
+        batch.set(codeRef, {
+          id: c.id,
+          tournamentId: c.tournamentId,
+          code: c.code,
+          status: c.status,
+          batchId: c.batchId,
+          batchNumber: c.batchNumber,
+          usedBy: null,
+          usedByName: null,
+          usedByGamertag: null,
+          usedAt: null,
+          createdAt: c.createdAt,
+        });
+      }
+      await batch.commit();
+    }
+
+    // 3. Update memory state (deduplicated by id)
+    const codeMap = new Map<string, RegistrationCode>();
+    this.registrationCodes.forEach((c) => codeMap.set(c.id, c));
+    generatedCodes.forEach((c) => codeMap.set(c.id, c));
+    this.registrationCodes = Array.from(codeMap.values());
+    this.notify();
+
+    return { batchId, batchNumber, codes: generatedCodes };
+  }
+
+  public async registerPlayerWithCode(
+    tournamentId: string,
+    userId: string,
+    code: string,
+    userName?: string,
+    userGamertag?: string
+  ): Promise<{ success: boolean; message: string }> {
+    const cleanCode = (code || '').trim().toUpperCase();
+    if (!cleanCode || cleanCode.length !== 6) {
+      return { success: false, message: 'Invalid registration code.' };
+    }
+
+    // Pre-check if tournament has closed registrations
+    const localTournament = this.getTournamentById(tournamentId);
+    if (localTournament) {
+      if (
+        localTournament.status === 'Ongoing' ||
+        localTournament.status === 'Completed' ||
+        localTournament.status === 'Finished'
+      ) {
+        return { success: false, message: 'Registration is closed for this challenge.' };
+      }
+    }
+
+    // Pre-check if player is already registered
+    if (this.isPlayerRegistered(tournamentId, userId)) {
+      return { success: false, message: 'You are already registered for this challenge.' };
+    }
+
+    const tournamentRef = doc(firestore, 'tournaments', tournamentId);
+    const playerDocId = `${tournamentId}_${userId}`;
+    const playerRef = doc(firestore, 'tournamentPlayers', playerDocId);
+    const codeDocId = `${tournamentId}_${cleanCode}`;
+    const codeRef = doc(firestore, 'registrationCodes', codeDocId);
+
+    try {
+      let registeredCount = 0;
+      let newSeed = 1;
+      let registrationDateStr = '';
+
+      await runTransaction(firestore, async (transaction) => {
+        // 1. Transactional Reads
+        const tourSnap = await transaction.get(tournamentRef);
+        if (!tourSnap.exists()) {
+          throw new Error('Tournament not found.');
+        }
+        const tourData = tourSnap.data();
+
+        if (
+          tourData.status === 'Ongoing' ||
+          tourData.status === 'Completed' ||
+          tourData.status === 'Finished'
+        ) {
+          throw new Error('Registration is closed for this challenge.');
+        }
+
+        const playerSnap = await transaction.get(playerRef);
+        if (playerSnap.exists()) {
+          throw new Error('You are already registered for this challenge.');
+        }
+
+        const codeSnap = await transaction.get(codeRef);
+        if (!codeSnap.exists()) {
+          throw new Error('Invalid registration code.');
+        }
+        const codeData = codeSnap.data();
+
+        if (codeData.tournamentId !== tournamentId) {
+          throw new Error('Invalid registration code.');
+        }
+
+        if (codeData.status !== 'AVAILABLE') {
+          throw new Error('This registration code has already been used.');
+        }
+
+        // Capacity check
+        const maxPlayers = typeof tourData.maxPlayers === 'number' ? tourData.maxPlayers : 16;
+        const currentCount =
+          typeof tourData.registeredPlayersCount === 'number'
+            ? tourData.registeredPlayersCount
+            : this.getConfirmedTournamentPlayers(tournamentId).length;
+
+        if (currentCount >= maxPlayers) {
+          throw new Error('Registration is full.');
+        }
+
+        registeredCount = currentCount + 1;
+        newSeed = registeredCount;
+
+        // 2. Transactional Writes
+        const now = new Date();
+        registrationDateStr = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(
+          now.getDate()
+        ).padStart(2, '0')} ${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
+
+        // Mark code as USED
+        transaction.update(codeRef, {
+          status: 'USED',
+          usedBy: userId,
+          usedByName: userName || null,
+          usedByGamertag: userGamertag || null,
+          usedAt: registrationDateStr,
+        });
+
+        // Create tournament player record with CONFIRMED authorization via code
+        transaction.set(playerRef, {
+          tournamentId,
+          userId,
+          status: 'Registered',
+          joinedAt: registrationDateStr,
+          registrationDate: registrationDateStr,
+          playerStatus: 'Registered',
+          paymentStatus: 'CONFIRMED',
+          registrationMethod: 'CODE',
+          registrationCode: cleanCode,
+          seed: newSeed,
+          checkInCode: `SG-${userId ? userId.slice(-4).toUpperCase() : '1001'}`,
+        });
+
+        // Update tournament player count
+        transaction.update(tournamentRef, {
+          registeredPlayersCount: registeredCount,
+        });
+      });
+
+      // Update in-memory structures immediately
+      const existingCode = this.registrationCodes.find((c) => c.id === codeDocId);
+      if (existingCode) {
+        existingCode.status = 'USED';
+        existingCode.usedBy = userId;
+        existingCode.usedByName = userName || null;
+        existingCode.usedByGamertag = userGamertag || null;
+        existingCode.usedAt = registrationDateStr || new Date().toISOString();
+      }
+
+      const newPlayer: TournamentPlayer = {
+        tournamentId,
+        userId,
+        registrationDate: registrationDateStr || new Date().toISOString(),
+        playerStatus: 'Registered',
+        paymentStatus: 'CONFIRMED',
+        registrationMethod: 'CODE',
+        registrationCode: cleanCode,
+        seed: newSeed,
+        checkInCode: `SG-${userId ? userId.slice(-4).toUpperCase() : '1001'}`,
+      };
+      this.tournamentPlayers = [
+        ...this.tournamentPlayers.filter((p) => !(p.tournamentId === tournamentId && p.userId === userId)),
+        newPlayer,
+      ];
+
+      const tour = this.getTournamentById(tournamentId);
+      if (tour) {
+        tour.registeredPlayersCount = registeredCount;
+      }
+
+      this.notify();
+      return { success: true, message: 'Registration successful.' };
+    } catch (err: any) {
+      console.error('Error during registration code transaction:', err);
+      const msg = err.message || 'Registration failed.';
+      if (
+        msg.includes('Invalid registration code.') ||
+        msg.includes('This registration code has already been used.') ||
+        msg.includes('Registration is full.') ||
+        msg.includes('You are already registered for this challenge.') ||
+        msg.includes('Registration is closed')
+      ) {
+        return { success: false, message: msg };
+      }
+      return { success: false, message: msg || 'Registration failed.' };
+    }
   }
 
   public async startTournamentAuto(tournamentId: string): Promise<{ success: boolean; message: string }> {
@@ -3372,26 +4612,7 @@ export class DatabaseService {
   // =========================================================================
   // NOTIFICATIONS SYSTEM
   // =========================================================================
-  private notifications: AppNotification[] = [
-    {
-      id: 'notif_1',
-      userId: 'user_tg_77201948',
-      title: 'Welcome to Awedadari!',
-      message: 'Explore upcoming gaming tournaments, join brackets, and compete for top ranks.',
-      type: 'system',
-      createdAt: new Date().toISOString(),
-      read: false,
-    },
-    {
-      id: 'notif_2',
-      userId: 'user_tg_88492019',
-      title: 'Organizer Hub Ready',
-      message: 'Create and publish your esports tournaments. Admin approval keeps events high quality.',
-      type: 'system',
-      createdAt: new Date().toISOString(),
-      read: true,
-    },
-  ];
+  private notifications: AppNotification[] = [];
 
   public getNotifications(userId: string): AppNotification[] {
     return this.notifications
@@ -3934,10 +5155,37 @@ export class DatabaseService {
     const allRankings = this.calculateAllGameRankings();
     const gamePlayerMap = allRankings.get(targetKey) || new Map();
 
-    const playerUsers = this.users.filter((u) => u.role === 'PLAYER');
+    // Gather all unique player IDs: all who competed in this game track + registered player accounts
+    const playerUserIds = new Set<string>();
+    gamePlayerMap.forEach((_, uid) => {
+      if (uid && typeof uid === 'string') playerUserIds.add(uid);
+    });
+    this.users.forEach((u) => {
+      if (u.role === 'PLAYER' || !u.role) {
+        playerUserIds.add(u.id);
+      }
+    });
 
-    const ranked: RankedPlayerGameProfile[] = playerUsers.map((user) => {
-      const record = gamePlayerMap.get(user.id);
+    const ranked: RankedPlayerGameProfile[] = Array.from(playerUserIds).map((userId) => {
+      const existingUser = this.users.find((u) => u.id === userId);
+      const user: User = existingUser || {
+        id: userId,
+        name: 'Competitor',
+        username: `player_${userId.slice(-4)}`,
+        profileImage: 'https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?w=150',
+        telegramUserId: `tg_${userId}`,
+        role: 'PLAYER',
+        gamertag: 'Competitor',
+        favGame: targetGameInfo.name,
+        rating: 5.0,
+        ratingCount: 0,
+      };
+
+      if (!existingUser && !userId.startsWith('demo_')) {
+        this.queueUserFetch(userId);
+      }
+
+      const record = gamePlayerMap.get(userId);
       const stats: PlayerGameStats = record
         ? { ...record.stats }
         : {

@@ -10,8 +10,11 @@ import {
   TournamentGroup,
   TournamentSession,
   FinalStanding,
+  RegistrationMethod,
+  RegistrationCode,
 } from '../../types';
 import { InviteModal } from '../common/InviteModal';
+import { PaginationControls } from '../common/PaginationControls';
 import {
   Trophy,
   Users,
@@ -51,7 +54,12 @@ import {
   Wallet,
   X,
   Lock,
+  Tv,
+  Key,
+  Copy,
+  Filter,
 } from 'lucide-react';
+import { extractYouTubeVideoId } from '../../utils/youtube';
 
 interface OrganizerPanelProps {
   user: User;
@@ -66,6 +74,8 @@ const parseEntryFeeNum = (feeStr?: string): number => {
 };
 
 export const OrganizerRevenueBreakdownTable: React.FC<{ user: User }> = ({ user }) => {
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(10);
   const orgTournaments = db.getOrganizerTournaments(user.id);
   const tournamentEarningsList = orgTournaments.map((t) => {
     const players = db.getTournamentPlayers(t.id);
@@ -73,7 +83,7 @@ export const OrganizerRevenueBreakdownTable: React.FC<{ user: User }> = ({ user 
     const countedPlayers = paidPlayers.length > 0 ? paidPlayers.length : players.length;
     const fee = parseEntryFeeNum(t.registrationFee);
     const collected = fee * countedPlayers;
-    const orgShare = Math.round(collected * 0.90 * 100) / 100;
+    const orgShare = Math.round(collected * 0.97 * 100) / 100;
 
     return {
       tournament: t,
@@ -84,6 +94,8 @@ export const OrganizerRevenueBreakdownTable: React.FC<{ user: User }> = ({ user 
       orgShare,
     };
   });
+
+  const paginatedEarningsList = tournamentEarningsList.slice((page - 1) * pageSize, page * pageSize);
 
   return (
     <div className="bg-slate-850 border border-slate-750 rounded-3xl p-5 space-y-4 shadow-lg">
@@ -97,39 +109,54 @@ export const OrganizerRevenueBreakdownTable: React.FC<{ user: User }> = ({ user 
           No tournaments created yet.
         </div>
       ) : (
-        <div className="overflow-x-auto">
-          <table className="w-full text-left text-xs text-slate-300">
-            <thead>
-              <tr className="border-b border-slate-750 text-slate-400 text-[11px] font-bold uppercase tracking-wider">
-                <th className="py-3 px-3">Tournament</th>
-                <th className="py-3 px-3">Entry Fee</th>
-                <th className="py-3 px-3">Players</th>
-                <th className="py-3 px-3">Collected</th>
-                <th className="py-3 px-3">Status</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-slate-800">
-              {tournamentEarningsList.map((item) => (
-                <tr key={item.tournament.id} className="hover:bg-slate-800/50 transition-colors">
-                  <td className="py-3 px-3 font-bold text-white">
-                    {item.tournament.tournamentName}
-                    <span className="block text-[10px] text-slate-400 font-normal">{item.tournament.game}</span>
-                  </td>
-                  <td className="py-3 px-3 font-semibold text-amber-300">{item.feeStr}</td>
-                  <td className="py-3 px-3 font-mono">{item.countedPlayers} / {item.maxPlayers}</td>
-                  <td className="py-3 px-3 font-bold text-emerald-400">{item.orgShare.toLocaleString()} ETB</td>
-                  <td className="py-3 px-3">
-                    <span className="px-2.5 py-1 rounded-full text-[10px] font-bold bg-slate-800 text-slate-300 border border-slate-750">
-                      {item.tournament.status === 'Completed' || item.tournament.status === 'Finished'
-                        ? 'Finished'
-                        : item.tournament.status || 'Active'}
-                    </span>
-                  </td>
+        <>
+          <div className="overflow-x-auto">
+            <table className="w-full text-left text-xs text-slate-300">
+              <thead>
+                <tr className="border-b border-slate-750 text-slate-400 text-[11px] font-bold uppercase tracking-wider">
+                  <th className="py-3 px-3">Tournament</th>
+                  <th className="py-3 px-3">Entry Fee</th>
+                  <th className="py-3 px-3">Players</th>
+                  <th className="py-3 px-3">Collected</th>
+                  <th className="py-3 px-3">Status</th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
+              </thead>
+              <tbody className="divide-y divide-slate-800">
+                {paginatedEarningsList.map((item) => (
+                  <tr key={item.tournament.id} className="hover:bg-slate-800/50 transition-colors">
+                    <td className="py-3 px-3 font-bold text-white">
+                      {item.tournament.tournamentName}
+                      <span className="block text-[10px] text-slate-400 font-normal">{item.tournament.game}</span>
+                    </td>
+                    <td className="py-3 px-3 font-semibold text-amber-300">{item.feeStr}</td>
+                    <td className="py-3 px-3 font-mono">{item.countedPlayers} / {item.maxPlayers}</td>
+                    <td className="py-3 px-3 font-bold text-emerald-400">{item.orgShare.toLocaleString()} ETB</td>
+                    <td className="py-3 px-3">
+                      <span className="px-2.5 py-1 rounded-full text-[10px] font-bold bg-slate-800 text-slate-300 border border-slate-750">
+                        {item.tournament.status === 'Completed' || item.tournament.status === 'Finished'
+                          ? 'Finished'
+                          : item.tournament.status || 'Active'}
+                      </span>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          {tournamentEarningsList.length > 5 && (
+            <PaginationControls
+              currentPage={page}
+              totalItems={tournamentEarningsList.length}
+              pageSize={pageSize}
+              onPageChange={setPage}
+              onPageSizeChange={(size) => {
+                setPageSize(size);
+                setPage(1);
+              }}
+              itemLabel="tournaments"
+            />
+          )}
+        </>
       )}
     </div>
   );
@@ -147,6 +174,9 @@ const OrganizerEarningsView: React.FC<{
 
   const orgTournaments = db.getOrganizerTournaments(user.id);
   const myWithdrawalRequests = db.getOrganizerWithdrawalRequests(user.id);
+  const [withdrawalPage, setWithdrawalPage] = useState(1);
+  const [withdrawalPageSize, setWithdrawalPageSize] = useState(5);
+  const paginatedWithdrawalRequests = myWithdrawalRequests.slice((withdrawalPage - 1) * withdrawalPageSize, withdrawalPage * withdrawalPageSize);
 
   // Calculate earnings per tournament
   const tournamentEarningsList = orgTournaments.map((t) => {
@@ -155,7 +185,7 @@ const OrganizerEarningsView: React.FC<{
     const countedPlayers = paidPlayers.length > 0 ? paidPlayers.length : players.length;
     const fee = parseEntryFeeNum(t.registrationFee);
     const collected = fee * countedPlayers;
-    const orgShare = Math.round(collected * 0.90 * 100) / 100;
+    const orgShare = Math.round(collected * 0.97 * 100) / 100;
 
     return {
       tournament: t,
@@ -226,7 +256,7 @@ const OrganizerEarningsView: React.FC<{
             Organizer Financial & Earnings Summary
           </h2>
           <p className="text-xs text-slate-400 mt-1">
-            Read-only financial summary (90% Organizer Share / 10% Admin Share) and withdrawal management.
+            Read-only financial summary (97% Organizer Share / 3% Admin Share) and withdrawal management.
           </p>
         </div>
 
@@ -280,37 +310,53 @@ const OrganizerEarningsView: React.FC<{
             No withdrawal requests submitted yet.
           </div>
         ) : (
-          <div className="space-y-2">
-            {myWithdrawalRequests.map((req) => (
-              <div
-                key={req.id}
-                className="bg-slate-900 border border-slate-750 p-3.5 rounded-2xl flex items-center justify-between text-xs"
-              >
-                <div className="space-y-0.5">
-                  <span className="font-bold text-white">{req.amount.toLocaleString()} ETB</span>
-                  {(req.telebirrName || req.telebirrNumber) && (
-                    <p className="text-[11px] text-slate-300 font-medium">
-                      Telebirr: <span className="font-bold">{req.telebirrName}</span> ({req.telebirrNumber})
-                    </p>
-                  )}
-                  {req.reason && !req.telebirrName && <p className="text-[11px] text-slate-400 italic">"{req.reason}"</p>}
-                  <span className="text-[10px] text-slate-500 block">
-                    {new Date(req.requestedAt).toLocaleString()}
+          <div className="space-y-3">
+            <div className="space-y-2">
+              {paginatedWithdrawalRequests.map((req) => (
+                <div
+                  key={req.id}
+                  className="bg-slate-900 border border-slate-750 p-3.5 rounded-2xl flex items-center justify-between text-xs"
+                >
+                  <div className="space-y-0.5">
+                    <span className="font-bold text-white">{req.amount.toLocaleString()} ETB</span>
+                    {(req.telebirrName || req.telebirrNumber) && (
+                      <p className="text-[11px] text-slate-300 font-medium">
+                        Telebirr: <span className="font-bold">{req.telebirrName}</span> ({req.telebirrNumber})
+                      </p>
+                    )}
+                    {req.reason && !req.telebirrName && <p className="text-[11px] text-slate-400 italic">"{req.reason}"</p>}
+                    <span className="text-[10px] text-slate-500 block">
+                      {new Date(req.requestedAt).toLocaleString()}
+                    </span>
+                  </div>
+                  <span
+                    className={`px-2.5 py-1 rounded-full text-[10px] font-bold ${
+                      req.status === 'Paid'
+                        ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30'
+                        : req.status === 'Rejected'
+                        ? 'bg-rose-500/20 text-rose-300 border border-rose-500/30'
+                        : 'bg-amber-500/20 text-amber-300 border border-amber-500/30'
+                    }`}
+                  >
+                    {req.status}
                   </span>
                 </div>
-                <span
-                  className={`px-2.5 py-1 rounded-full text-[10px] font-bold ${
-                    req.status === 'Paid'
-                      ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30'
-                      : req.status === 'Rejected'
-                      ? 'bg-rose-500/20 text-rose-300 border border-rose-500/30'
-                      : 'bg-amber-500/20 text-amber-300 border border-amber-500/30'
-                  }`}
-                >
-                  {req.status}
-                </span>
-              </div>
-            ))}
+              ))}
+            </div>
+
+            {myWithdrawalRequests.length > 5 && (
+              <PaginationControls
+                currentPage={withdrawalPage}
+                totalItems={myWithdrawalRequests.length}
+                pageSize={withdrawalPageSize}
+                onPageChange={setWithdrawalPage}
+                onPageSizeChange={(size) => {
+                  setWithdrawalPageSize(size);
+                  setWithdrawalPage(1);
+                }}
+                itemLabel="requests"
+              />
+            )}
           </div>
         )}
       </div>
@@ -737,13 +783,64 @@ export const OrganizerPanel: React.FC<OrganizerPanelProps> = ({ user }) => {
   const isTourOngoing = activeTournament?.status === 'Ongoing';
   const isTourRegistrationOpen = activeTournament?.status === 'Registration Open' || activeTournament?.status === 'Upcoming' || activeTournament?.status === 'Draft';
 
-  // 3 Manager Desk Tabs:
+  // 4 Manager Desk Tabs:
   // 1. Manage Tournament
-  // 2. Manage Standings
-  // 3. Manage Matches
-  const [activeMainTab, setActiveMainTab] = useState<'MANAGE_TOURNAMENT' | 'MANAGE_STANDINGS' | 'MANAGE_MATCHES'>(
+  // 2. Registration Codes (when method = CODE)
+  // 3. Manage Standings
+  // 4. Manage Matches
+  const [activeMainTab, setActiveMainTab] = useState<'MANAGE_TOURNAMENT' | 'REGISTRATION_CODES' | 'MANAGE_STANDINGS' | 'MANAGE_MATCHES'>(
     'MANAGE_TOURNAMENT'
   );
+
+  // Registration Codes State
+  const [codesToGenerateCount, setCodesToGenerateCount] = useState<number>(20);
+  const [isGeneratingCodes, setIsGeneratingCodes] = useState<boolean>(false);
+  const [copiedCode, setCopiedCode] = useState<string | null>(null);
+  const [codeStatusFilter, setCodeStatusFilter] = useState<'ALL' | 'AVAILABLE' | 'USED'>('ALL');
+  const [codeSearchQuery, setCodeSearchQuery] = useState<string>('');
+
+  const handleCopyCode = (codeStr: string) => {
+    try {
+      if (navigator?.clipboard?.writeText) {
+        navigator.clipboard.writeText(codeStr);
+      } else {
+        const el = document.createElement('textarea');
+        el.value = codeStr;
+        document.body.appendChild(el);
+        el.select();
+        document.execCommand('copy');
+        document.body.removeChild(el);
+      }
+      setCopiedCode(codeStr);
+      setTimeout(() => setCopiedCode(null), 2000);
+      showToast(`Copied code ${codeStr}`);
+    } catch {
+      showToast(`Code: ${codeStr}`);
+    }
+  };
+
+  const handleCopyAllAvailableCodes = (availableCodes: RegistrationCode[]) => {
+    if (availableCodes.length === 0) {
+      showToast('No available codes to copy', 'error');
+      return;
+    }
+    const text = availableCodes.map((c) => c.code).join('\n');
+    try {
+      if (navigator?.clipboard?.writeText) {
+        navigator.clipboard.writeText(text);
+      } else {
+        const el = document.createElement('textarea');
+        el.value = text;
+        document.body.appendChild(el);
+        el.select();
+        document.execCommand('copy');
+        document.body.removeChild(el);
+      }
+      showToast(`Copied ${availableCodes.length} available code(s) to clipboard!`);
+    } catch {
+      showToast('Failed to copy to clipboard', 'error');
+    }
+  };
 
   // Feedback states
   const [toast, setToast] = useState<{ msg: string; type: 'success' | 'error' } | null>(null);
@@ -786,6 +883,9 @@ export const OrganizerPanel: React.FC<OrganizerPanelProps> = ({ user }) => {
   const [formVenue, setFormVenue] = useState(activeTournament?.venueName || '');
   const [formVenueLocation, setFormVenueLocation] = useState(activeTournament?.venueLocation || '');
   const [formFee, setFormFee] = useState(activeTournament?.registrationFee || '50 ETB');
+  const [formRegistrationMethod, setFormRegistrationMethod] = useState<RegistrationMethod>(
+    activeTournament?.registrationMethod || (activeTournament?.registrationFee && activeTournament.registrationFee !== 'Free' ? 'PAYMENT' : 'OPEN')
+  );
   const [formAward, setFormAward] = useState(activeTournament?.award || activeTournament?.prizePool || '');
   const [formTelebirr, setFormTelebirr] = useState(activeTournament?.telebirrNumber || '');
   const [formTelebirrName, setFormTelebirrName] = useState(activeTournament?.telebirrAccountName || '');
@@ -797,6 +897,8 @@ export const OrganizerPanel: React.FC<OrganizerPanelProps> = ({ user }) => {
   const [formPerformanceLabel, setFormPerformanceLabel] = useState(activeTournament?.performanceLabel || 'Goals');
   const [formSessionLabel, setFormSessionLabel] = useState(activeTournament?.sessionLabel || 'Match');
   const [formStatus, setFormStatus] = useState<TournamentStatus>(activeTournament?.status || 'Upcoming');
+  const [formYoutubeUrl, setFormYoutubeUrl] = useState('');
+  const [youtubeUrlError, setYoutubeUrlError] = useState<string | null>(null);
   const [customBannerUpload, setCustomBannerUpload] = useState<string>('');
 
   const handleBannerFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -847,6 +949,9 @@ export const OrganizerPanel: React.FC<OrganizerPanelProps> = ({ user }) => {
       setFormVenue(tour.venueName || 'Nexus Gaming Lounge');
       setFormVenueLocation(tour.venueLocation || 'Bole Medhanialem, Building 3, 2nd Floor');
       setFormFee(tour.registrationFee || '50 ETB');
+      setFormRegistrationMethod(
+        tour.registrationMethod || (tour.registrationFee && tour.registrationFee !== 'Free' && tour.registrationFee !== '0 ETB' ? 'PAYMENT' : 'OPEN')
+      );
       setFormAward(tour.award || tour.prizePool || '');
       setFormTelebirr(tour.telebirrNumber || '');
       setFormTelebirrName(tour.telebirrAccountName || user.name);
@@ -858,6 +963,8 @@ export const OrganizerPanel: React.FC<OrganizerPanelProps> = ({ user }) => {
       setFormPerformanceLabel(tour.performanceLabel || 'Goals');
       setFormSessionLabel(tour.sessionLabel || 'Match');
       setFormStatus(tour.status);
+      setFormYoutubeUrl(tour.youtubeStreamUrl || (tour.youtubeVideoId ? `https://www.youtube.com/watch?v=${tour.youtubeVideoId}` : ''));
+      setYoutubeUrlError(null);
     }
   };
 
@@ -929,13 +1036,32 @@ export const OrganizerPanel: React.FC<OrganizerPanelProps> = ({ user }) => {
 
     const finalImage = customBannerUpload || formImage;
 
+    // Validate YouTube URL if provided
+    let videoId: string | null = null;
+    if (formYoutubeUrl.trim()) {
+      videoId = extractYouTubeVideoId(formYoutubeUrl.trim());
+      if (!videoId) {
+        setYoutubeUrlError('Please enter a valid YouTube stream or video URL (e.g. https://www.youtube.com/watch?v=... or https://youtu.be/...)');
+        showToast('Invalid YouTube stream URL', 'error');
+        return;
+      }
+    }
+
+    const effectiveFee =
+      formRegistrationMethod === 'CODE'
+        ? 'Registration Code'
+        : formRegistrationMethod === 'OPEN'
+        ? 'Free'
+        : formFee;
+
     const updateFields: any = {
       tournamentName: formName,
       game: formGame,
       image: finalImage,
       venueName: formVenue,
       venueLocation: formVenueLocation,
-      registrationFee: formFee,
+      registrationFee: effectiveFee,
+      registrationMethod: formRegistrationMethod,
       award: formAward.trim(),
       date: formDate,
       time: formTime,
@@ -945,6 +1071,8 @@ export const OrganizerPanel: React.FC<OrganizerPanelProps> = ({ user }) => {
       performanceLabel: formPerformanceLabel,
       sessionLabel: formSessionLabel,
       status: formStatus,
+      youtubeVideoId: videoId || '',
+      youtubeStreamUrl: formYoutubeUrl.trim(),
     };
 
     if (!activeTournament.isApproved) {
@@ -964,6 +1092,24 @@ export const OrganizerPanel: React.FC<OrganizerPanelProps> = ({ user }) => {
       return;
     }
 
+    // Validate YouTube URL if provided
+    let videoId: string | null = null;
+    if (formYoutubeUrl.trim()) {
+      videoId = extractYouTubeVideoId(formYoutubeUrl.trim());
+      if (!videoId) {
+        setYoutubeUrlError('Please enter a valid YouTube stream or video URL (e.g. https://www.youtube.com/watch?v=... or https://youtu.be/...)');
+        showToast('Invalid YouTube stream URL', 'error');
+        return;
+      }
+    }
+
+    const effectiveFee =
+      formRegistrationMethod === 'CODE'
+        ? 'Registration Code'
+        : formRegistrationMethod === 'OPEN'
+        ? 'Free'
+        : formFee;
+
     const newTour = await db.createTournament({
       tournamentName: formName.trim(),
       game: formGame.trim() || 'eFootball 2026',
@@ -976,18 +1122,23 @@ export const OrganizerPanel: React.FC<OrganizerPanelProps> = ({ user }) => {
       organizerId: user.id,
       venueName: formVenue,
       venueLocation: formVenueLocation,
-      registrationFee: formFee,
+      registrationFee: effectiveFee,
+      registrationMethod: formRegistrationMethod,
       award: formAward.trim(),
-      telebirrNumber: formTelebirr,
-      telebirrAccountName: formTelebirrName,
+      telebirrNumber: formRegistrationMethod === 'PAYMENT' ? formTelebirr : '',
+      telebirrAccountName: formRegistrationMethod === 'PAYMENT' ? formTelebirrName : '',
       maxRounds: Number(formMaxRounds),
       performanceLabel: formPerformanceLabel,
       sessionLabel: formSessionLabel,
       isApproved: false, // REQUIRES ADMIN APPROVAL!
+      youtubeVideoId: videoId || undefined,
+      youtubeStreamUrl: formYoutubeUrl.trim() || undefined,
     });
 
     // Reset form fields
     setFormName('');
+    setFormYoutubeUrl('');
+    setYoutubeUrlError(null);
     setCreatedSuccessModalOpen(true);
     setTopTab('MY_TOURNAMENTS');
   };
@@ -1534,18 +1685,98 @@ export const OrganizerPanel: React.FC<OrganizerPanelProps> = ({ user }) => {
                 </div>
               </div>
 
-              {/* Entry Fee */}
-              <div className="space-y-1">
-                <label className="text-amber-300 font-bold">Registration Entry Fee</label>
-                <input
-                  type="text"
-                  value={formFee}
-                  onChange={(e) => setFormFee(e.target.value)}
-                  placeholder="Fee (e.g. 50 ETB or Free)"
-                  className="w-full bg-slate-900 border border-slate-750 rounded-xl px-3 py-2 text-amber-300 font-bold focus:outline-hidden focus:border-amber-400"
-                  required
-                />
+              {/* Registration Access Method */}
+              <div className="sm:col-span-2 space-y-2 p-3 bg-slate-900 border border-slate-750 rounded-2xl">
+                <label className="text-amber-400 font-bold flex items-center justify-between text-xs">
+                  <span className="flex items-center gap-1.5">
+                    <Key className="w-3.5 h-3.5 text-amber-400" />
+                    Registration Access Method
+                  </span>
+                  <span className="text-[10px] text-slate-400 font-normal">Choose how players enter this challenge</span>
+                </label>
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setFormRegistrationMethod('OPEN');
+                      setFormFee('Free');
+                    }}
+                    className={`p-2.5 rounded-xl border text-left transition-all flex flex-col gap-1 ${
+                      formRegistrationMethod === 'OPEN'
+                        ? 'bg-amber-500/15 border-amber-400 text-white'
+                        : 'bg-slate-950/60 border-slate-800 text-slate-400 hover:text-slate-200 hover:border-slate-700'
+                    }`}
+                  >
+                    <div className="flex items-center justify-between">
+                      <span className="font-extrabold text-xs text-white">Open Registration</span>
+                      {formRegistrationMethod === 'OPEN' && <Check className="w-3.5 h-3.5 text-amber-400" />}
+                    </div>
+                    <span className="text-[10px] leading-tight opacity-80">Free & direct entry. Any player can join immediately.</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setFormRegistrationMethod('CODE');
+                      setFormFee('Registration Code');
+                    }}
+                    className={`p-2.5 rounded-xl border text-left transition-all flex flex-col gap-1 ${
+                      formRegistrationMethod === 'CODE'
+                        ? 'bg-amber-500/15 border-amber-400 text-white'
+                        : 'bg-slate-950/60 border-slate-800 text-slate-400 hover:text-slate-200 hover:border-slate-700'
+                    }`}
+                  >
+                    <div className="flex items-center justify-between">
+                      <span className="font-extrabold text-xs text-amber-300">Registration Code</span>
+                      {formRegistrationMethod === 'CODE' && <Check className="w-3.5 h-3.5 text-amber-400" />}
+                    </div>
+                    <span className="text-[10px] leading-tight opacity-80">Requires a 6-character access code generated by organizer.</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setFormRegistrationMethod('PAYMENT');
+                      if (formFee === 'Free' || formFee === 'Registration Code') setFormFee('50 ETB');
+                    }}
+                    className={`p-2.5 rounded-xl border text-left transition-all flex flex-col gap-1 ${
+                      formRegistrationMethod === 'PAYMENT'
+                        ? 'bg-amber-500/15 border-amber-400 text-white'
+                        : 'bg-slate-950/60 border-slate-800 text-slate-400 hover:text-slate-200 hover:border-slate-700'
+                    }`}
+                  >
+                    <div className="flex items-center justify-between">
+                      <span className="font-extrabold text-xs text-emerald-300">Payment / Receipt</span>
+                      {formRegistrationMethod === 'PAYMENT' && <Check className="w-3.5 h-3.5 text-amber-400" />}
+                    </div>
+                    <span className="text-[10px] leading-tight opacity-80">Telebirr transfer receipt screenshot & organizer approval.</span>
+                  </button>
+                </div>
+
+                {formRegistrationMethod === 'CODE' && (
+                  <div className="p-2.5 bg-amber-500/10 border border-amber-500/20 rounded-xl text-[11px] text-amber-200 flex items-start gap-2">
+                    <Info className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
+                    <span>
+                      <strong>Registration Codes:</strong> You can generate batches of single-use codes directly from the manager desk once created. Provide them to players via offline tickets, cash payments, or private invite.
+                    </span>
+                  </div>
+                )}
               </div>
+
+              {/* Entry Fee (if PAYMENT or custom) */}
+              {formRegistrationMethod === 'PAYMENT' && (
+                <div className="space-y-1">
+                  <label className="text-amber-300 font-bold">Registration Entry Fee</label>
+                  <input
+                    type="text"
+                    value={formFee}
+                    onChange={(e) => setFormFee(e.target.value)}
+                    placeholder="Fee (e.g. 50 ETB)"
+                    className="w-full bg-slate-900 border border-slate-750 rounded-xl px-3 py-2 text-amber-300 font-bold focus:outline-hidden focus:border-amber-400"
+                    required
+                  />
+                </div>
+              )}
 
               {/* Tournament Award (Optional) */}
               <div className="space-y-1">
@@ -1564,10 +1795,10 @@ export const OrganizerPanel: React.FC<OrganizerPanelProps> = ({ user }) => {
                 />
               </div>
 
-              {/* Organizer Phone Number (Requirement 2) */}
+              {/* Organizer Phone Number */}
               <div className="space-y-1">
                 <label className="text-emerald-400 font-bold flex items-center gap-1">
-                  <Phone className="w-3.5 h-3.5" /> Organizer Phone Number
+                  <Phone className="w-3.5 h-3.5" /> {formRegistrationMethod === 'PAYMENT' ? 'Telebirr Payment Phone Number' : 'Organizer Contact Phone Number'}
                 </label>
                 <input
                   type="text"
@@ -1663,6 +1894,38 @@ export const OrganizerPanel: React.FC<OrganizerPanelProps> = ({ user }) => {
                   className="w-full bg-slate-900 border border-slate-750 rounded-xl px-3 py-2 text-white focus:outline-hidden focus:border-amber-400 font-bold"
                 />
               </div>
+
+              {/* YouTube Stream URL */}
+              <div className="space-y-1 sm:col-span-2 p-3 bg-slate-900/90 border border-slate-750 rounded-2xl">
+                <label className="text-red-400 font-bold flex items-center justify-between">
+                  <span className="flex items-center gap-1.5">
+                    <Tv className="w-3.5 h-3.5 text-red-500" /> YouTube Stream URL
+                  </span>
+                  <span className="text-[10px] text-slate-400 font-normal">Optional</span>
+                </label>
+                <input
+                  type="url"
+                  value={formYoutubeUrl}
+                  onChange={(e) => {
+                    setFormYoutubeUrl(e.target.value);
+                    if (youtubeUrlError) setYoutubeUrlError(null);
+                  }}
+                  placeholder="Paste YouTube stream URL"
+                  className={`w-full bg-slate-950 border rounded-xl px-3 py-2 text-white font-medium focus:outline-hidden text-xs ${
+                    youtubeUrlError ? 'border-red-500 focus:border-red-500' : 'border-slate-700 focus:border-red-500'
+                  }`}
+                />
+                {youtubeUrlError ? (
+                  <p className="text-[11px] text-red-400 flex items-center gap-1 pt-0.5">
+                    <AlertCircle className="w-3 h-3 shrink-0" />
+                    {youtubeUrlError}
+                  </p>
+                ) : (
+                  <p className="text-[10px] text-slate-400 pt-0.5">
+                    Optional • Supports YouTube livestream or video URLs
+                  </p>
+                )}
+              </div>
             </div>
 
             {/* Submit Button */}
@@ -1718,62 +1981,87 @@ export const OrganizerPanel: React.FC<OrganizerPanelProps> = ({ user }) => {
               </div>
             </div>
 
-            {/* THREE MAIN DESK TABS */}
-            <div className="grid grid-cols-3 gap-1.5 bg-slate-900 p-1.5 rounded-2xl border border-slate-800 text-xs font-black">
-              <button
-                onClick={() => setActiveMainTab('MANAGE_TOURNAMENT')}
-                className={`py-2 px-2 rounded-xl transition-all flex flex-col items-center justify-center gap-0.5 ${
-                  activeMainTab === 'MANAGE_TOURNAMENT'
-                    ? 'bg-amber-500 text-slate-950 shadow-md font-black'
-                    : 'text-slate-400 hover:text-slate-200 hover:bg-slate-850'
-                }`}
-              >
-                <div className="flex items-center gap-1.5">
-                  <Settings className="w-3.5 h-3.5" />
-                  <span className="truncate">EDIT</span>
-                </div>
-                {(isTourOngoing || isTourCompleted) && (
-                  <span className="text-[9px] font-bold opacity-80">(View Only)</span>
-                )}
-              </button>
+            {/* MAIN DESK TABS */}
+            {(() => {
+              const activeCodes = db.getRegistrationCodes(activeTournament.id);
+              const isCodeMethod = activeTournament.registrationMethod === 'CODE' || formRegistrationMethod === 'CODE';
+              return (
+                <div className={`grid ${isCodeMethod ? 'grid-cols-2 sm:grid-cols-4' : 'grid-cols-3'} gap-1.5 bg-slate-900 p-1.5 rounded-2xl border border-slate-800 text-xs font-black`}>
+                  <button
+                    onClick={() => setActiveMainTab('MANAGE_TOURNAMENT')}
+                    className={`py-2 px-2 rounded-xl transition-all flex flex-col items-center justify-center gap-0.5 ${
+                      activeMainTab === 'MANAGE_TOURNAMENT'
+                        ? 'bg-amber-500 text-slate-950 shadow-md font-black'
+                        : 'text-slate-400 hover:text-slate-200 hover:bg-slate-850'
+                    }`}
+                  >
+                    <div className="flex items-center gap-1.5">
+                      <Settings className="w-3.5 h-3.5" />
+                      <span className="truncate">EDIT</span>
+                    </div>
+                    {(isTourOngoing || isTourCompleted) && (
+                      <span className="text-[9px] font-bold opacity-80">(View Only)</span>
+                    )}
+                  </button>
 
-              <button
-                onClick={() => {
-                  setActiveMainTab('MANAGE_STANDINGS');
-                  initializeFinalRows();
-                }}
-                className={`py-2 px-2 rounded-xl transition-all flex flex-col items-center justify-center gap-0.5 ${
-                  activeMainTab === 'MANAGE_STANDINGS'
-                    ? 'bg-amber-500 text-slate-950 shadow-md font-black'
-                    : 'text-slate-400 hover:text-slate-200 hover:bg-slate-850'
-                }`}
-              >
-                <div className="flex items-center gap-1.5">
-                  <Trophy className="w-3.5 h-3.5" />
-                  <span className="truncate">STANDINGS</span>
-                </div>
-                {isTourOngoing && (
-                  <span className="text-[9px] font-bold opacity-80">(Editable)</span>
-                )}
-              </button>
+                  {isCodeMethod && (
+                    <button
+                      onClick={() => setActiveMainTab('REGISTRATION_CODES')}
+                      className={`py-2 px-2 rounded-xl transition-all flex flex-col items-center justify-center gap-0.5 ${
+                        activeMainTab === 'REGISTRATION_CODES'
+                          ? 'bg-amber-500 text-slate-950 shadow-md font-black'
+                          : 'text-slate-400 hover:text-slate-200 hover:bg-slate-850'
+                      }`}
+                    >
+                      <div className="flex items-center gap-1.5">
+                        <Key className="w-3.5 h-3.5" />
+                        <span className="truncate">CODES</span>
+                      </div>
+                      <span className="text-[9px] font-bold opacity-80">
+                        ({activeCodes.length} Generated)
+                      </span>
+                    </button>
+                  )}
 
-              <button
-                onClick={() => setActiveMainTab('MANAGE_MATCHES')}
-                className={`py-2 px-2 rounded-xl transition-all flex flex-col items-center justify-center gap-0.5 ${
-                  activeMainTab === 'MANAGE_MATCHES'
-                    ? 'bg-amber-500 text-slate-950 shadow-md font-black'
-                    : 'text-slate-400 hover:text-slate-200 hover:bg-slate-850'
-                }`}
-              >
-                <div className="flex items-center gap-1.5">
-                  <Swords className="w-3.5 h-3.5" />
-                  <span className="truncate">MATCHES</span>
+                  <button
+                    onClick={() => {
+                      setActiveMainTab('MANAGE_STANDINGS');
+                      initializeFinalRows();
+                    }}
+                    className={`py-2 px-2 rounded-xl transition-all flex flex-col items-center justify-center gap-0.5 ${
+                      activeMainTab === 'MANAGE_STANDINGS'
+                        ? 'bg-amber-500 text-slate-950 shadow-md font-black'
+                        : 'text-slate-400 hover:text-slate-200 hover:bg-slate-850'
+                    }`}
+                  >
+                    <div className="flex items-center gap-1.5">
+                      <Trophy className="w-3.5 h-3.5" />
+                      <span className="truncate">STANDINGS</span>
+                    </div>
+                    {isTourOngoing && (
+                      <span className="text-[9px] font-bold opacity-80">(Editable)</span>
+                    )}
+                  </button>
+
+                  <button
+                    onClick={() => setActiveMainTab('MANAGE_MATCHES')}
+                    className={`py-2 px-2 rounded-xl transition-all flex flex-col items-center justify-center gap-0.5 ${
+                      activeMainTab === 'MANAGE_MATCHES'
+                        ? 'bg-amber-500 text-slate-950 shadow-md font-black'
+                        : 'text-slate-400 hover:text-slate-200 hover:bg-slate-850'
+                    }`}
+                  >
+                    <div className="flex items-center gap-1.5">
+                      <Swords className="w-3.5 h-3.5" />
+                      <span className="truncate">MATCHES</span>
+                    </div>
+                    {isTourOngoing && (
+                      <span className="text-[9px] font-bold opacity-80">(Editable)</span>
+                    )}
+                  </button>
                 </div>
-                {isTourOngoing && (
-                  <span className="text-[9px] font-bold opacity-80">(Editable)</span>
-                )}
-              </button>
-            </div>
+              );
+            })()}
           </div>
 
           {/* DESK TAB 1: MANAGE TOURNAMENT */}
@@ -1872,16 +2160,91 @@ export const OrganizerPanel: React.FC<OrganizerPanelProps> = ({ user }) => {
                         </div>
                       </div>
 
-                      <div className="space-y-1">
-                        <label className="text-amber-300 font-bold">Registration Entry Fee</label>
-                        <input
-                          type="text"
-                          value={formFee}
-                          onChange={(e) => setFormFee(e.target.value)}
-                          placeholder="Fee (e.g. 50 ETB or Free)"
-                          className="w-full bg-slate-900 border border-slate-750 rounded-xl px-3 py-2 text-amber-300 font-bold"
-                        />
+                      {/* Registration Access Method */}
+                      <div className="sm:col-span-2 space-y-2 p-3 bg-slate-900 border border-slate-750 rounded-2xl">
+                        <label className="text-amber-400 font-bold flex items-center justify-between text-xs">
+                          <span className="flex items-center gap-1.5">
+                            <Key className="w-3.5 h-3.5 text-amber-400" />
+                            Registration Access Method
+                          </span>
+                          <span className="text-[10px] text-slate-400 font-normal">Tournament entry requirement</span>
+                        </label>
+                        <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                          <button
+                            type="button"
+                            disabled={isTourOngoing || isTourCompleted}
+                            onClick={() => {
+                              setFormRegistrationMethod('OPEN');
+                              setFormFee('Free');
+                            }}
+                            className={`p-2.5 rounded-xl border text-left transition-all flex flex-col gap-1 ${
+                              formRegistrationMethod === 'OPEN'
+                                ? 'bg-amber-500/15 border-amber-400 text-white'
+                                : 'bg-slate-950/60 border-slate-800 text-slate-400 hover:text-slate-200 hover:border-slate-700'
+                            } ${isTourOngoing || isTourCompleted ? 'opacity-60 cursor-not-allowed' : ''}`}
+                          >
+                            <div className="flex items-center justify-between">
+                              <span className="font-extrabold text-xs text-white">Open Registration</span>
+                              {formRegistrationMethod === 'OPEN' && <Check className="w-3.5 h-3.5 text-amber-400" />}
+                            </div>
+                            <span className="text-[10px] leading-tight opacity-80">Free direct entry without code.</span>
+                          </button>
+
+                          <button
+                            type="button"
+                            disabled={isTourOngoing || isTourCompleted}
+                            onClick={() => {
+                              setFormRegistrationMethod('CODE');
+                              setFormFee('Registration Code');
+                            }}
+                            className={`p-2.5 rounded-xl border text-left transition-all flex flex-col gap-1 ${
+                              formRegistrationMethod === 'CODE'
+                                ? 'bg-amber-500/15 border-amber-400 text-white'
+                                : 'bg-slate-950/60 border-slate-800 text-slate-400 hover:text-slate-200 hover:border-slate-700'
+                            } ${isTourOngoing || isTourCompleted ? 'opacity-60 cursor-not-allowed' : ''}`}
+                          >
+                            <div className="flex items-center justify-between">
+                              <span className="font-extrabold text-xs text-amber-300">Registration Code</span>
+                              {formRegistrationMethod === 'CODE' && <Check className="w-3.5 h-3.5 text-amber-400" />}
+                            </div>
+                            <span className="text-[10px] leading-tight opacity-80">Requires single-use 6-char code.</span>
+                          </button>
+
+                          <button
+                            type="button"
+                            disabled={isTourOngoing || isTourCompleted}
+                            onClick={() => {
+                              setFormRegistrationMethod('PAYMENT');
+                              if (formFee === 'Free' || formFee === 'Registration Code') setFormFee('50 ETB');
+                            }}
+                            className={`p-2.5 rounded-xl border text-left transition-all flex flex-col gap-1 ${
+                              formRegistrationMethod === 'PAYMENT'
+                                ? 'bg-amber-500/15 border-amber-400 text-white'
+                                : 'bg-slate-950/60 border-slate-800 text-slate-400 hover:text-slate-200 hover:border-slate-700'
+                            } ${isTourOngoing || isTourCompleted ? 'opacity-60 cursor-not-allowed' : ''}`}
+                          >
+                            <div className="flex items-center justify-between">
+                              <span className="font-extrabold text-xs text-emerald-300">Payment / Receipt</span>
+                              {formRegistrationMethod === 'PAYMENT' && <Check className="w-3.5 h-3.5 text-amber-400" />}
+                            </div>
+                            <span className="text-[10px] leading-tight opacity-80">Requires Telebirr receipt & approval.</span>
+                          </button>
+                        </div>
                       </div>
+
+                      {formRegistrationMethod === 'PAYMENT' && (
+                        <div className="space-y-1">
+                          <label className="text-amber-300 font-bold">Registration Entry Fee</label>
+                          <input
+                            type="text"
+                            value={formFee}
+                            onChange={(e) => setFormFee(e.target.value)}
+                            placeholder="Fee (e.g. 50 ETB)"
+                            className="w-full bg-slate-900 border border-slate-750 rounded-xl px-3 py-2 text-amber-300 font-bold"
+                            disabled={isTourOngoing || isTourCompleted}
+                          />
+                        </div>
+                      )}
 
                       <div className="space-y-1">
                         <label className="text-amber-300 font-bold flex items-center justify-between">
@@ -1945,6 +2308,66 @@ export const OrganizerPanel: React.FC<OrganizerPanelProps> = ({ user }) => {
                             <option value="Completed" disabled>Completed (Finished)</option>
                           )}
                         </select>
+                      </div>
+
+                      {/* YouTube Stream URL */}
+                      <div className="space-y-1 sm:col-span-2 p-3 bg-slate-900 border border-slate-750 rounded-2xl">
+                        <div className="flex items-center justify-between">
+                          <label className="text-red-400 font-bold flex items-center gap-1.5 text-xs">
+                            <Tv className="w-3.5 h-3.5 text-red-500" /> YouTube Stream URL
+                          </label>
+                          <span className="text-[10px] text-slate-400 font-normal">Optional</span>
+                        </div>
+                        <div className="flex flex-col sm:flex-row gap-2">
+                          <input
+                            type="url"
+                            value={formYoutubeUrl}
+                            disabled={isTourCompleted}
+                            onChange={(e) => {
+                              setFormYoutubeUrl(e.target.value);
+                              if (youtubeUrlError) setYoutubeUrlError(null);
+                            }}
+                            placeholder="Paste YouTube stream URL"
+                            className={`w-full bg-slate-950 border rounded-xl px-3 py-2 text-white font-medium focus:outline-hidden text-xs ${
+                              youtubeUrlError ? 'border-red-500 focus:border-red-500' : 'border-slate-700 focus:border-red-500'
+                            } disabled:opacity-60 disabled:cursor-not-allowed`}
+                          />
+                          {isTourOngoing && (
+                            <button
+                              type="button"
+                              onClick={async () => {
+                                let videoId: string | null = null;
+                                if (formYoutubeUrl.trim()) {
+                                  videoId = extractYouTubeVideoId(formYoutubeUrl.trim());
+                                  if (!videoId) {
+                                    setYoutubeUrlError('Please enter a valid YouTube stream or video URL');
+                                    showToast('Invalid YouTube stream URL', 'error');
+                                    return;
+                                  }
+                                }
+                                await db.updateTournament(activeTournament.id, {
+                                  youtubeVideoId: videoId || '',
+                                  youtubeStreamUrl: formYoutubeUrl.trim(),
+                                });
+                                showToast('Live stream URL updated!');
+                              }}
+                              className="px-4 py-2 bg-red-600 hover:bg-red-500 active:scale-95 text-white font-bold rounded-xl text-xs shrink-0 flex items-center justify-center gap-1"
+                            >
+                              <Save className="w-3.5 h-3.5" />
+                              Update Stream
+                            </button>
+                          )}
+                        </div>
+                        {youtubeUrlError ? (
+                          <p className="text-[11px] text-red-400 flex items-center gap-1 pt-0.5">
+                            <AlertCircle className="w-3 h-3 shrink-0" />
+                            {youtubeUrlError}
+                          </p>
+                        ) : (
+                          <p className="text-[10px] text-slate-400 pt-0.5">
+                            Optional • Supports YouTube livestream or video URLs
+                          </p>
+                        )}
                       </div>
                     </div>
                   </fieldset>
@@ -2178,6 +2601,405 @@ export const OrganizerPanel: React.FC<OrganizerPanelProps> = ({ user }) => {
               </div>
             </div>
           )}
+
+          {/* DESK TAB: REGISTRATION CODES */}
+          {activeMainTab === 'REGISTRATION_CODES' && (() => {
+            const allCodesRaw = db.getRegistrationCodes(activeTournament.id);
+            // Ensure absolute uniqueness by id
+            const seenCodeIds = new Set<string>();
+            const allCodes = allCodesRaw.filter((c) => {
+              if (seenCodeIds.has(c.id)) return false;
+              seenCodeIds.add(c.id);
+              return true;
+            });
+            const availableCodes = allCodes.filter((c) => c.status === 'AVAILABLE');
+            const usedCodes = allCodes.filter((c) => c.status === 'USED');
+            const registeredCount = db.getTournamentPlayers(activeTournament.id).length;
+            const capacity = activeTournament.maxPlayers;
+
+            // Apply search & status filter
+            const filteredCodes = allCodes.filter((c) => {
+              if (codeStatusFilter === 'AVAILABLE' && c.status !== 'AVAILABLE') return false;
+              if (codeStatusFilter === 'USED' && c.status !== 'USED') return false;
+              if (codeSearchQuery.trim()) {
+                const q = codeSearchQuery.trim().toLowerCase();
+                const matchCode = c.code.toLowerCase().includes(q);
+                const matchUser = c.usedByName?.toLowerCase().includes(q) || c.usedByGamertag?.toLowerCase().includes(q);
+                return matchCode || matchUser;
+              }
+              return true;
+            });
+
+            // Group filtered codes by batchNumber
+            const batchMap = new Map<number, RegistrationCode[]>();
+            filteredCodes.forEach((c) => {
+              const bNum = c.batchNumber || 1;
+              if (!batchMap.has(bNum)) {
+                batchMap.set(bNum, []);
+              }
+              batchMap.get(bNum)!.push(c);
+            });
+            const sortedBatchNumbers = Array.from(batchMap.keys()).sort((a, b) => b - a);
+
+            const handleGenerateBatch = async () => {
+              if (!activeTournament) return;
+              if (codesToGenerateCount < 1 || codesToGenerateCount > 200) {
+                showToast('Batch size must be between 1 and 200', 'error');
+                return;
+              }
+              setIsGeneratingCodes(true);
+              try {
+                const created = await db.generateRegistrationCodes(activeTournament.id, codesToGenerateCount);
+                showToast(`Generated batch of ${created.codes.length} code(s)!`);
+              } catch (err: any) {
+                showToast(err?.message || 'Failed to generate codes', 'error');
+              } finally {
+                setIsGeneratingCodes(false);
+              }
+            };
+
+            return (
+              <div className="space-y-5">
+                {/* Header & Principle Explanation */}
+                <div className="bg-slate-850 border border-slate-750 rounded-3xl p-4 sm:p-5 shadow-md space-y-3">
+                  <div className="flex flex-wrap items-center justify-between gap-3">
+                    <div className="flex items-center gap-2.5">
+                      <div className="w-9 h-9 rounded-xl bg-amber-500/20 text-amber-300 flex items-center justify-center border border-amber-500/30">
+                        <Key className="w-5 h-5 text-amber-400" />
+                      </div>
+                      <div>
+                        <h2 className="text-base font-black text-white">Registration Access Codes</h2>
+                        <p className="text-xs text-slate-400">
+                          Authorized entry codes for players to join this challenge
+                        </p>
+                      </div>
+                    </div>
+
+                    <div className="flex items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={() => handleCopyAllAvailableCodes(availableCodes)}
+                        disabled={availableCodes.length === 0}
+                        className="px-3.5 py-2 bg-slate-800 hover:bg-slate-750 disabled:opacity-40 text-slate-200 border border-slate-700 rounded-xl font-extrabold text-xs transition-all flex items-center gap-1.5"
+                      >
+                        <Copy className="w-3.5 h-3.5 text-amber-400" />
+                        Copy All Available ({availableCodes.length})
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* Summary Metric Cards */}
+                  <div className="grid grid-cols-2 sm:grid-cols-5 gap-2 pt-2 border-t border-slate-800">
+                    <div className="p-3 bg-slate-900/80 rounded-2xl border border-slate-800 flex flex-col">
+                      <span className="text-[10px] text-slate-400 font-bold uppercase tracking-wider">Capacity</span>
+                      <span className="text-lg font-black text-white mt-0.5">{capacity}</span>
+                      <span className="text-[9px] text-slate-500">Max Players</span>
+                    </div>
+
+                    <div className="p-3 bg-slate-900/80 rounded-2xl border border-slate-800 flex flex-col">
+                      <span className="text-[10px] text-sky-400 font-bold uppercase tracking-wider">Registered</span>
+                      <span className="text-lg font-black text-sky-300 mt-0.5">{registeredCount}</span>
+                      <span className="text-[9px] text-slate-500">{Math.max(0, capacity - registeredCount)} spots open</span>
+                    </div>
+
+                    <div className="p-3 bg-slate-900/80 rounded-2xl border border-slate-800 flex flex-col">
+                      <span className="text-[10px] text-slate-400 font-bold uppercase tracking-wider">Generated</span>
+                      <span className="text-lg font-black text-white mt-0.5">{allCodes.length}</span>
+                      <span className="text-[9px] text-slate-500">Total Codes</span>
+                    </div>
+
+                    <div className="p-3 bg-emerald-500/10 rounded-2xl border border-emerald-500/20 flex flex-col">
+                      <span className="text-[10px] text-emerald-400 font-bold uppercase tracking-wider">Available</span>
+                      <span className="text-lg font-black text-emerald-300 mt-0.5">{availableCodes.length}</span>
+                      <span className="text-[9px] text-emerald-500/80">Ready to Share</span>
+                    </div>
+
+                    <div className="p-3 bg-slate-900/80 rounded-2xl border border-slate-800 flex flex-col col-span-2 sm:col-span-1">
+                      <span className="text-[10px] text-amber-400 font-bold uppercase tracking-wider">Used</span>
+                      <span className="text-lg font-black text-amber-300 mt-0.5">{usedCodes.length}</span>
+                      <span className="text-[9px] text-slate-500">Redeemed</span>
+                    </div>
+                  </div>
+
+                  {/* Independent Concept Notice */}
+                  <div className="p-3 bg-amber-500/10 border border-amber-500/20 rounded-2xl text-[11px] text-amber-200 flex items-start gap-2">
+                    <Info className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
+                    <span>
+                      <strong>Access & Capacity Independence:</strong> Challenge capacity ({capacity} players) and generated codes count ({allCodes.length}) are separate concepts. Codes grant authorization to register, but players can only join while spots remain open.
+                    </span>
+                  </div>
+                </div>
+
+                {/* Batch Generator Panel */}
+                <div className="bg-slate-850 border border-slate-750 rounded-3xl p-4 sm:p-5 shadow-md space-y-4">
+                  <div className="flex flex-wrap items-center justify-between gap-3">
+                    <div className="flex items-center gap-2">
+                      <PlusCircle className="w-4 h-4 text-amber-400" />
+                      <h3 className="text-sm font-extrabold text-white">Generate Code Batch</h3>
+                    </div>
+                    <span className="text-xs text-slate-400">
+                      Codes are unique, 6-character, and race-safe
+                    </span>
+                  </div>
+
+                  <div className="flex flex-wrap items-center gap-3">
+                    {/* Quick Count Presets */}
+                    <div className="flex items-center gap-1.5 bg-slate-900 p-1 rounded-xl border border-slate-800">
+                      {[5, 10, 20, 50, 100].map((count) => (
+                        <button
+                          key={count}
+                          type="button"
+                          onClick={() => setCodesToGenerateCount(count)}
+                          className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all ${
+                            codesToGenerateCount === count
+                              ? 'bg-amber-400 text-slate-950 font-black shadow-xs'
+                              : 'text-slate-400 hover:text-white'
+                          }`}
+                        >
+                          {count}
+                        </button>
+                      ))}
+                    </div>
+
+                    {/* Custom Input */}
+                    <div className="flex items-center gap-2">
+                      <span className="text-xs text-slate-400 font-medium">Qty:</span>
+                      <input
+                        type="number"
+                        min={1}
+                        max={200}
+                        value={codesToGenerateCount}
+                        onChange={(e) => setCodesToGenerateCount(Math.max(1, Math.min(200, parseInt(e.target.value) || 1)))}
+                        className="w-20 bg-slate-900 border border-slate-750 rounded-xl px-3 py-1.5 text-white font-bold text-xs text-center focus:outline-hidden focus:border-amber-400"
+                      />
+                    </div>
+
+                    <button
+                      type="button"
+                      disabled={isGeneratingCodes}
+                      onClick={handleGenerateBatch}
+                      className="px-5 py-2 bg-amber-400 hover:bg-amber-300 disabled:opacity-50 text-slate-950 font-black text-xs rounded-xl shadow-md transition-all active:scale-95 flex items-center gap-1.5 ml-auto"
+                    >
+                      {isGeneratingCodes ? (
+                        <>
+                          <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                          Generating...
+                        </>
+                      ) : (
+                        <>
+                          <Zap className="w-3.5 h-3.5 fill-current" />
+                          Generate {codesToGenerateCount} Codes
+                        </>
+                      )}
+                    </button>
+                  </div>
+                </div>
+
+                {/* Filter & Search Bar */}
+                <div className="bg-slate-850 border border-slate-750 rounded-3xl p-4 sm:p-5 shadow-md space-y-4">
+                  <div className="flex flex-wrap items-center justify-between gap-3">
+                    {/* Status Filter Pills */}
+                    <div className="flex items-center gap-1 bg-slate-900 p-1 rounded-xl border border-slate-800 text-xs font-bold">
+                      <button
+                        type="button"
+                        onClick={() => setCodeStatusFilter('ALL')}
+                        className={`px-3 py-1.5 rounded-lg transition-all ${
+                          codeStatusFilter === 'ALL'
+                            ? 'bg-amber-400 text-slate-950 font-black'
+                            : 'text-slate-400 hover:text-white'
+                        }`}
+                      >
+                        All ({allCodes.length})
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setCodeStatusFilter('AVAILABLE')}
+                        className={`px-3 py-1.5 rounded-lg transition-all ${
+                          codeStatusFilter === 'AVAILABLE'
+                            ? 'bg-emerald-400 text-slate-950 font-black'
+                            : 'text-emerald-400/80 hover:text-emerald-300'
+                        }`}
+                      >
+                        Available ({availableCodes.length})
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setCodeStatusFilter('USED')}
+                        className={`px-3 py-1.5 rounded-lg transition-all ${
+                          codeStatusFilter === 'USED'
+                            ? 'bg-slate-600 text-white font-black'
+                            : 'text-slate-400 hover:text-white'
+                        }`}
+                      >
+                        Used ({usedCodes.length})
+                      </button>
+                    </div>
+
+                    {/* Search Input */}
+                    <div className="relative w-full sm:w-64">
+                      <input
+                        type="text"
+                        placeholder="Search code or player..."
+                        value={codeSearchQuery}
+                        onChange={(e) => setCodeSearchQuery(e.target.value)}
+                        className="w-full bg-slate-900 border border-slate-750 rounded-xl px-3 py-1.5 text-xs text-white placeholder-slate-500 focus:outline-hidden focus:border-amber-400"
+                      />
+                      {codeSearchQuery && (
+                        <button
+                          type="button"
+                          onClick={() => setCodeSearchQuery('')}
+                          className="absolute right-2.5 top-2 text-slate-400 hover:text-white text-xs"
+                        >
+                          ✕
+                        </button>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* Batches and Code List */}
+                  {allCodes.length === 0 ? (
+                    <div className="py-12 text-center space-y-3">
+                      <Key className="w-10 h-10 text-slate-600 mx-auto" />
+                      <h4 className="text-sm font-extrabold text-white">No Registration Codes Generated</h4>
+                      <p className="text-xs text-slate-400 max-w-sm mx-auto">
+                        Click the "Generate Codes" button above to create your first batch of player entry codes.
+                      </p>
+                    </div>
+                  ) : filteredCodes.length === 0 ? (
+                    <div className="py-8 text-center text-xs text-slate-400">
+                      No codes matching the current filter.
+                    </div>
+                  ) : (
+                    <div className="space-y-6">
+                      {sortedBatchNumbers.map((batchNum) => {
+                        const batchCodes = batchMap.get(batchNum) || [];
+                        const availInBatch = batchCodes.filter((c) => c.status === 'AVAILABLE');
+                        const usedInBatch = batchCodes.filter((c) => c.status === 'USED');
+                        const batchCreatedStr = batchCodes[0]?.createdAt
+                          ? new Date(batchCodes[0].createdAt).toLocaleDateString(undefined, {
+                              month: 'short',
+                              day: 'numeric',
+                              hour: '2-digit',
+                              minute: '2-digit',
+                            })
+                          : 'Recent';
+
+                        return (
+                          <div
+                            key={batchNum}
+                            className="bg-slate-900/60 border border-slate-800 rounded-2xl p-3.5 sm:p-4 space-y-3"
+                          >
+                            {/* Batch Header Bar */}
+                            <div className="flex flex-wrap items-center justify-between gap-2 pb-2.5 border-b border-slate-800/80">
+                              <div className="flex items-center gap-2">
+                                <span className="px-2.5 py-1 bg-amber-500/15 text-amber-300 font-black text-xs rounded-lg border border-amber-500/30">
+                                  Batch #{batchNum}
+                                </span>
+                                <span className="text-xs text-slate-400">
+                                  Created: <span className="text-slate-300 font-medium">{batchCreatedStr}</span>
+                                </span>
+                              </div>
+
+                              <div className="flex items-center gap-2">
+                                <span className="text-[11px] text-slate-400 font-medium">
+                                  <strong className="text-emerald-400">{availInBatch.length}</strong> available • <strong className="text-amber-400">{usedInBatch.length}</strong> used
+                                </span>
+                                {availInBatch.length > 0 && (
+                                  <button
+                                    type="button"
+                                    onClick={() => handleCopyAllAvailableCodes(availInBatch)}
+                                    className="text-[11px] font-bold text-sky-400 hover:text-sky-300 underline ml-2"
+                                  >
+                                    Copy Available ({availInBatch.length})
+                                  </button>
+                                )}
+                              </div>
+                            </div>
+
+                            {/* Codes Grid */}
+                            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-2.5">
+                              {batchCodes.map((codeItem, codeIdx) => {
+                                const isAvail = codeItem.status === 'AVAILABLE';
+                                const isCopied = copiedCode === codeItem.code;
+
+                                return (
+                                  <div
+                                    key={`${codeItem.id}_${codeIdx}`}
+                                    className={`p-3 rounded-xl border transition-all ${
+                                      isAvail
+                                        ? 'bg-slate-950/80 border-slate-800 hover:border-amber-500/40'
+                                        : 'bg-slate-950/40 border-slate-850 opacity-75'
+                                    }`}
+                                  >
+                                    <div className="flex items-center justify-between gap-2">
+                                      <span className="font-mono text-base font-black tracking-wider text-white">
+                                        {codeItem.code}
+                                      </span>
+
+                                      {isAvail ? (
+                                        <button
+                                          type="button"
+                                          onClick={() => handleCopyCode(codeItem.code)}
+                                          className={`px-2 py-1 rounded-lg text-[10px] font-extrabold transition-all flex items-center gap-1 ${
+                                            isCopied
+                                              ? 'bg-emerald-500 text-slate-950 shadow-xs'
+                                              : 'bg-slate-800 hover:bg-slate-700 text-slate-200'
+                                          }`}
+                                          title="Copy code"
+                                        >
+                                          {isCopied ? (
+                                            <>
+                                              <Check className="w-3 h-3" />
+                                              Copied!
+                                            </>
+                                          ) : (
+                                            <>
+                                              <Copy className="w-3 h-3 text-amber-400" />
+                                              Copy
+                                            </>
+                                          )}
+                                        </button>
+                                      ) : (
+                                        <span className="px-2 py-0.5 bg-slate-800 text-slate-400 text-[10px] font-bold rounded-md">
+                                          USED
+                                        </span>
+                                      )}
+                                    </div>
+
+                                    {/* Used Information */}
+                                    {!isAvail && (
+                                      <div className="mt-2 pt-2 border-t border-slate-850 text-[10px] text-slate-400 space-y-0.5">
+                                        <div className="text-slate-300 font-semibold truncate">
+                                          Used by: {codeItem.usedByName || 'Player'}
+                                          {codeItem.usedByGamertag && (
+                                            <span className="text-sky-400 font-mono ml-1">@{codeItem.usedByGamertag}</span>
+                                          )}
+                                        </div>
+                                        {codeItem.usedAt && (
+                                          <div className="text-slate-500 text-[9px]">
+                                            {new Date(codeItem.usedAt).toLocaleString(undefined, {
+                                              month: 'short',
+                                              day: 'numeric',
+                                              hour: '2-digit',
+                                              minute: '2-digit',
+                                            })}
+                                          </div>
+                                        )}
+                                      </div>
+                                    )}
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+              </div>
+            );
+          })()}
 
           {/* DESK TAB 2: MANAGE STANDINGS */}
           {activeMainTab === 'MANAGE_STANDINGS' && (
