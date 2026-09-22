@@ -1,9 +1,12 @@
 {
   "projectId": "tewedadari-app",
-  "appId": "1:288103242176:web:6ee71566c05e0e53cdd025",
+  "appId": "1:288103242176:web:5b0e171d219e9558cdd025",
   "apiKey": "AIzaSyCNm4zuzPUN-oOZcCCCW9WEreut2rjq7V4",
   "authDomain": "tewedadari-app.firebaseapp.com",
+  "firestoreDatabaseId": "ai-studio-awedadari-ddabb8ef-399f-49bf-88e8-cb12c59537e1",
   "storageBucket": "tewedadari-app.firebasestorage.app",
   "messagingSenderId": "288103242176",
-  "firestoreDatabaseId": "ai-studio-awedadari-ddabb8ef-399f-49bf-88e8-cb12c59537e1"
+  "measurementId": "G-SR4HGHKT0X",
+  "oAuthClientId": "288103242176-0eob0cino6a4t5ah0i454ldpm5ub8p5s.apps.googleusercontent.com",
+  "recaptchaSiteKey": ""
 }

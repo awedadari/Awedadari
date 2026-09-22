@@ -9,6 +9,8 @@ import { TelegramBotModal } from './components/TelegramBotModal';
 import { AdminPortalModal } from './components/admin/AdminPortalModal';
 import { telegramService, TELEGRAM_BOT_DEFAULT } from './services/telegramService';
 import { WebAuthScreen } from './components/auth/WebAuthScreen';
+import { TelegramPhoneGate } from './components/auth/TelegramPhoneGate';
+import { WebPhoneVerificationGate } from './components/auth/WebPhoneVerificationGate';
 
 // Player Views
 import { PlayerHome } from './components/player/PlayerHome';
@@ -259,6 +261,30 @@ export default function App() {
   // Absolute safety check: Never render user-scoped UI if activeUser is null
   if (!activeUser) {
     return null;
+  }
+
+  // 4. Phone Verification Gate (One-time, mandatory before entering the app)
+  const hasSavedPhone = Boolean(activeUser.phoneNumber && activeUser.phoneNumber.trim());
+  if (!hasSavedPhone) {
+    if (isInsideTelegram) {
+      return (
+        <TelegramPhoneGate
+          user={activeUser}
+          onSuccess={() => {
+            // db.updateUser updates Firestore/local cache and triggers useDbStore refresh
+          }}
+        />
+      );
+    } else {
+      return (
+        <WebPhoneVerificationGate
+          user={activeUser}
+          onSuccess={() => {
+            // db.updateUser updates Firestore/local cache and triggers useDbStore refresh
+          }}
+        />
+      );
+    }
   }
 
   // If role is switched from Organizer to Player while on 'organizer_panel', fallback to 'home'

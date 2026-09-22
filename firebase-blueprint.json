@@ -56,24 +56,34 @@
         "registrationMethod": { "type": "string", "enum": ["OPEN", "CODE", "PAYMENT"] },
         "registeredPlayersCount": { "type": "number" },
         "youtubeVideoId": { "type": "string" },
-        "youtubeStreamUrl": { "type": "string" }
+        "youtubeStreamUrl": { "type": "string" },
+        "coOrganizerIds": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "List of user IDs granted co-organizer management access to this tournament"
+        }
       },
       "required": ["organizerId"]
     },
     "TournamentPlayer": {
       "title": "TournamentPlayer",
-      "description": "Player registration for a specific tournament",
+      "description": "Player registration for a specific tournament (supports both user accounts and manual participant additions)",
       "type": "object",
       "properties": {
         "tournamentId": { "type": "string" },
-        "userId": { "type": "string" },
+        "userId": { "type": ["string", "null"] },
+        "name": { "type": "string" },
+        "phoneNumber": { "type": "string" },
+        "telegramUsername": { "type": "string" },
+        "email": { "type": "string" },
+        "registrationSource": { "type": "string", "enum": ["online", "manual"] },
         "paymentProofUrl": { "type": "string" },
-        "paymentStatus": { "type": "string", "enum": ["PENDING", "CONFIRMED", "REJECTED"] },
+        "paymentStatus": { "type": "string", "enum": ["PENDING", "CONFIRMED", "REJECTED", "UNPAID"] },
         "isCheckedIn": { "type": "boolean" },
         "registrationMethod": { "type": "string" },
         "registrationCode": { "type": "string" }
       },
-      "required": ["tournamentId", "userId"]
+      "required": ["tournamentId"]
     },
     "RegistrationCode": {
       "title": "RegistrationCode",

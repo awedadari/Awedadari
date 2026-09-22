@@ -68,35 +68,16 @@ export const PlayerHome: React.FC<PlayerHomeProps> = ({
   const [showNotifications, setShowNotifications] = useState(false);
   const [selectedGameFilter, setSelectedGameFilter] = useState<string>('ALL');
 
-  // Gamertag local editing state
-  const [editingGamertag, setEditingGamertag] = useState(false);
-  const [gamertagInput, setGamertagInput] = useState(user.gamertag || '');
   const [toast, setToast] = useState<{ type: 'success' | 'error'; msg: string } | null>(null);
 
-  useEffect(() => {
-    setGamertagInput(user.gamertag || '');
-  }, [user.id, user.gamertag]);
-
-  const showToast = (msg: string, type: 'success' | 'error' = 'success') => {
-    setToast({ msg, type });
-    telegramService.triggerHaptic(type === 'success' ? 'success' : 'warning');
-    setTimeout(() => setToast(null), 3000);
-  };
-
-  const handleSaveGamertag = () => {
-    if (!gamertagInput.trim()) {
-      showToast('Please enter a valid gamertag', 'error');
-      return;
-    }
-    db.updateUser({ id: user.id, gamertag: gamertagInput.trim() });
-    setEditingGamertag(false);
-    showToast('Gamertag updated successfully!');
-  };
-
-  // Requirement 3: Updated Game Categories
+  // Requirement: Updated Challenge Categories
   const gameCategories = [
-    { id: 'ALL', name: 'All Games', icon: '🎮' },
+    { id: 'ALL', name: 'All Tournaments', icon: '🏆' },
+    { id: 'Boxing', name: 'Boxing', icon: '🥊' },
     { id: 'eFootball', name: 'eFootball', icon: '⚽' },
+    { id: 'Crochet', name: 'Crochet', icon: '🧶' },
+    { id: 'Hacking', name: 'Hacking', icon: '💻' },
+    { id: 'Cooking', name: 'Cooking', icon: '🍳' },
     { id: 'PUBG Mobile', name: 'PUBG Mobile', icon: '🎯' },
     { id: 'Asphalt Legends Unite', name: 'Asphalt Legends Unite', icon: '🏎️' },
     { id: 'Call of Duty: Mobile', name: 'Call of Duty: Mobile', icon: '💥' },
@@ -242,7 +223,7 @@ export const PlayerHome: React.FC<PlayerHomeProps> = ({
           </p>
         </div>
 
-        {/* Gamertag & Team Card */}
+        {/* Competitor Identity Card */}
         <div className="relative z-10 p-3.5 bg-slate-900/90 backdrop-blur-md rounded-2xl border border-slate-750 flex items-center justify-between shadow-inner">
           <div className="flex items-center gap-3 min-w-0 flex-1">
             <div className="w-10 h-10 rounded-xl bg-sky-600 flex items-center justify-center text-white font-black text-sm shrink-0 shadow-md">
@@ -250,48 +231,23 @@ export const PlayerHome: React.FC<PlayerHomeProps> = ({
             </div>
             <div className="min-w-0 flex-1">
               <div className="flex items-center gap-2">
-                <span className="text-[10px] text-slate-400 uppercase tracking-wider font-extrabold">Gamer Tag</span>
+                <span className="text-[10px] text-slate-400 uppercase tracking-wider font-extrabold">Competitor</span>
                 {user.teamName && (
                   <span className="px-2 py-0.5 bg-amber-500/10 text-amber-300 font-bold text-[9px] rounded-full border border-amber-500/20">
                     {user.teamName}
                   </span>
                 )}
               </div>
-              {editingGamertag ? (
-                <div className="flex items-center gap-1.5 mt-1">
-                  <input
-                    type="text"
-                    value={gamertagInput}
-                    onChange={(e) => setGamertagInput(e.target.value)}
-                    className="bg-slate-850 border border-slate-700 text-xs text-white px-2 py-1 rounded-lg focus:outline-none focus:border-sky-500 w-full"
-                    placeholder="Enter Gamertag..."
-                  />
-                  <button
-                    onClick={handleSaveGamertag}
-                    className="text-xs px-3 py-1 bg-sky-500 hover:bg-sky-400 text-slate-950 rounded-lg font-bold shrink-0"
-                  >
-                    Save
-                  </button>
-                </div>
-              ) : (
-                <p className="text-xs font-black text-emerald-400 truncate mt-0.5">
-                  {user.gamertag ? `@${user.gamertag}` : <span className="text-amber-400 font-normal">No gamertag set</span>}
-                </p>
-              )}
+              <p className="text-xs font-black text-white truncate mt-0.5">
+                {user.name}
+              </p>
             </div>
           </div>
 
-          {!editingGamertag && (
-            <button
-              onClick={() => {
-                setEditingGamertag(true);
-                telegramService.triggerHaptic('light');
-              }}
-              className="text-xs text-sky-400 hover:text-sky-300 font-bold px-2.5 py-1.5 bg-sky-500/10 hover:bg-sky-500/20 rounded-xl transition-colors shrink-0 ml-2 border border-sky-500/20"
-            >
-              {user.gamertag ? 'Edit Tag' : 'Set Tag'}
-            </button>
-          )}
+          <div className="flex items-center gap-1.5 px-2.5 py-1 bg-emerald-500/10 border border-emerald-500/20 rounded-xl text-emerald-400 text-xs font-bold shrink-0">
+            <ShieldCheck className="w-3.5 h-3.5" />
+            <span>Verified</span>
+          </div>
         </div>
       </div>
 
@@ -342,10 +298,10 @@ export const PlayerHome: React.FC<PlayerHomeProps> = ({
         </div>
       )}
 
-      {/* GAME CATEGORIES CAROUSEL (Requirement 3) */}
+      {/* CATEGORIES CAROUSEL */}
       <div className="space-y-2">
         <span className="text-xs font-black text-slate-300 uppercase tracking-wider block px-1">
-          Game Categories
+          Categories
         </span>
         <div className="flex items-center gap-2 overflow-x-auto pb-1 no-scrollbar">
           {gameCategories.map((cat) => (

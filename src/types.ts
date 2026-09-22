@@ -103,7 +103,7 @@ export interface TournamentSession {
   scores: SessionPlayerScore[];
 }
 
-export type RegistrationMethod = 'OPEN' | 'CODE' | 'PAYMENT';
+export type RegistrationMethod = 'OPEN' | 'CODE' | 'PAYMENT' | 'MANUAL';
 
 export interface Tournament {
   id: string;
@@ -128,6 +128,7 @@ export interface Tournament {
   currentRound?: number; // 1, 2, 3 for multi-round points format
   maxRounds?: number; // default 3
   isApproved?: boolean; // Admin approval required before posted to players
+  isRejected?: boolean; // Admin rejection flag
   registrationFee?: string; // e.g. "50 ETB" or "Free"
   prizePool?: string; // e.g. "1000 ETB"
   award?: string; // e.g. "1000 ETB", "500 ETB + Trophy", "Champion Trophy", "Gaming Keyboard"
@@ -141,6 +142,7 @@ export interface Tournament {
   killMultiplier?: number; // default 1
   youtubeVideoId?: string; // YouTube video ID for livestream or match recording
   youtubeStreamUrl?: string; // Full YouTube URL for external fallback
+  coOrganizerIds?: string[]; // User IDs of co-organizers authorized to operate this tournament
   createdAt?: string;
 }
 
@@ -151,7 +153,7 @@ export interface TournamentGroup {
   playerIds: string[];
   roundNumber?: number;
   manualRanks?: Record<string, number>; // userId -> rank override for tie situations
-  playerStatuses?: Record<string, 'Waiting' | 'Qualified' | 'Eliminated' | 'Champion'>;
+  playerStatuses?: Record<string, 'Waiting' | 'Qualified' | 'Eliminated'>;
 }
 
 export interface PlayerRoundScore {
@@ -169,8 +171,14 @@ export interface PlayerRoundScore {
 }
 
 export interface TournamentPlayer {
+  id?: string;
   tournamentId: string;
-  userId: string;
+  userId?: string | null;
+  name?: string;
+  phoneNumber?: string;
+  telegramUsername?: string;
+  email?: string;
+  registrationSource?: 'online' | 'manual';
   registrationDate: string;
   playerStatus: PlayerStatus;
   paymentStatus?: PaymentStatus;

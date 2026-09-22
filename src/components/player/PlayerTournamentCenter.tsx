@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { db, auth } from '../../services/db';
 import { compressImage } from '../../utils/imageCompressor';
 import { telegramService } from '../../services/telegramService';
+import { normalizePhoneNumber } from '../../utils/phoneUtils';
 import { useCursorPagination } from '../../hooks/useCursorPagination';
 import { User, Tournament, Match } from '../../types';
 import { InviteModal } from '../common/InviteModal';
@@ -22,6 +23,7 @@ import {
   RefreshCw,
   Share2,
   ShieldCheck,
+  Shield,
   Star,
   Phone,
   Copy,
@@ -29,6 +31,8 @@ import {
   Award,
   Tv,
   Key,
+  Send,
+  Loader2,
 } from 'lucide-react';
 import { TournamentStreamPlayer } from '../stream/TournamentStreamPlayer';
 
@@ -44,7 +48,7 @@ export const PlayerTournamentCenter: React.FC<PlayerTournamentCenterProps> = ({ 
   const [activeTournament, setActiveTournament] = useState<Tournament | null>(initialTournament || null);
   const [detailTab, setDetailTab] = useState<'INFO' | 'ROSTER' | 'WATCH_RESULTS' | 'ORGANIZER'>('INFO');
   const [watchSubTab, setWatchSubTab] = useState<'STANDINGS' | 'MATCHES'>('STANDINGS');
-  const [playerStandingsSubTab, setPlayerStandingsSubTab] = useState<'ROUNDS' | 'FINAL_RESULT'>('ROUNDS');
+  const [playerStandingsTab, setPlayerStandingsTab] = useState<number | 'FINAL_RESULTS'>(1);
   const [playerSelectedRound, setPlayerSelectedRound] = useState<number>(1);
   const [, setTick] = useState<number>(0);
 
@@ -53,6 +57,7 @@ export const PlayerTournamentCenter: React.FC<PlayerTournamentCenterProps> = ({ 
       setActiveTournament(initialTournament);
       setDetailTab('INFO');
       setWatchSubTab('STANDINGS');
+      setPlayerStandingsTab(1);
     }
   }, [initialTournament]);
 
@@ -119,7 +124,7 @@ export const PlayerTournamentCenter: React.FC<PlayerTournamentCenterProps> = ({ 
   });
 
   const filteredTournaments = allTournaments.filter((t) => {
-    if (selectedGame !== 'ALL' && t.game !== selectedGame) return false;
+    if (selectedGame !== 'ALL' && t.game !== selectedGame && t.game.toLowerCase() !== selectedGame.toLowerCase()) return false;
     if (selectedStatus !== 'ALL' && t.status !== selectedStatus) return false;
     if (searchQuery.trim()) {
       const q = searchQuery.toLowerCase().trim();
@@ -162,10 +167,6 @@ export const PlayerTournamentCenter: React.FC<PlayerTournamentCenterProps> = ({ 
   });
 
   const handleOpenRegisterPaymentModal = (tournamentId: string) => {
-    if (!user.gamertag) {
-      showToast('Please set your gamertag in Profile first!', 'error');
-      return;
-    }
     setRegPhoneNumber(user.phoneNumber || '');
     setPaymentRegisterTourId(tournamentId);
     setPaymentScreenshotUrl('');
@@ -210,8 +211,10 @@ export const PlayerTournamentCenter: React.FC<PlayerTournamentCenterProps> = ({ 
       isUidMatch,
     });
 
-    if (!regPhoneNumber.trim()) {
-      showToast('Phone number is required to register for tournaments.', 'error');
+    const effectivePhone = user.phoneNumber || regPhoneNumber;
+    const cleanPhone = effectivePhone.trim() ? normalizePhoneNumber(effectivePhone.trim()) : '';
+    if (!cleanPhone) {
+      showToast('A valid phone number is required to register for tournaments.', 'error');
       return;
     }
 
@@ -222,15 +225,16 @@ export const PlayerTournamentCenter: React.FC<PlayerTournamentCenterProps> = ({ 
 
     setIsSubmittingPayment(true);
     try {
-      // Step 1: Save phone number to user profile
+      // Step 1: Save normalized phone number to user profile
+      setRegPhoneNumber(cleanPhone);
       console.log('PAYMENT_DEBUG: STEP 1 updateUser START', {
         userId: user.id,
-        phoneNumber: regPhoneNumber.trim(),
+        phoneNumber: cleanPhone,
       });
 
       const updateUserRes = await db.updateUser({
         id: user.id,
-        phoneNumber: regPhoneNumber.trim(),
+        phoneNumber: cleanPhone,
       });
 
       console.log('PAYMENT_DEBUG: STEP 1 updateUser RESULT', {
@@ -284,11 +288,6 @@ export const PlayerTournamentCenter: React.FC<PlayerTournamentCenterProps> = ({ 
   };
 
   const handleStartRegistration = (tournament: Tournament) => {
-    if (!user.gamertag) {
-      showToast('Please set your gamertag in Profile first!', 'error');
-      return;
-    }
-
     const method =
       tournament.registrationMethod ||
       (tournament.registrationFee && tournament.registrationFee !== 'Free' && tournament.registrationFee !== '0 ETB' && tournament.registrationFee !== 'Registration Code'
@@ -454,7 +453,7 @@ export const PlayerTournamentCenter: React.FC<PlayerTournamentCenterProps> = ({ 
                   : 'bg-slate-850 text-slate-300 hover:bg-slate-800 border border-slate-750'
               }`}
             >
-              {game === 'ALL' ? 'All Games' : game}
+              {game === 'ALL' ? 'All Tournaments' : game}
             </button>
           ))}
         </div>
@@ -644,6 +643,7 @@ export const PlayerTournamentCenter: React.FC<PlayerTournamentCenterProps> = ({ 
                             setActiveTournament(t);
                             setDetailTab('INFO');
                             setWatchSubTab('STANDINGS');
+                            setPlayerStandingsTab(1);
                             telegramService.triggerHaptic('light');
                           }}
                           className="flex items-center gap-1 text-xs font-bold text-slate-300 hover:text-white bg-slate-800 hover:bg-slate-750 px-3 py-2 rounded-xl border border-slate-700 transition-colors min-h-[38px] capitalize"
@@ -781,7 +781,11 @@ export const PlayerTournamentCenter: React.FC<PlayerTournamentCenterProps> = ({ 
                 PLAYERS ({liveActiveTournament ? db.getTournamentPlayers(liveActiveTournament.id).length : 0})
               </button>
               <button
-                onClick={() => setDetailTab('WATCH_RESULTS')}
+                onClick={() => {
+                  setDetailTab('WATCH_RESULTS');
+                  setWatchSubTab('STANDINGS');
+                  setPlayerStandingsTab(1);
+                }}
                 className={`py-3 px-4 border-b-2 font-black uppercase whitespace-nowrap transition-colors flex items-center gap-1.5 ${
                   detailTab === 'WATCH_RESULTS'
                     ? 'border-amber-400 text-amber-400'
@@ -915,7 +919,10 @@ export const PlayerTournamentCenter: React.FC<PlayerTournamentCenterProps> = ({ 
                   <div className="grid grid-cols-2 gap-2 p-1 bg-slate-900 border border-slate-800 rounded-xl">
                     <button
                       type="button"
-                      onClick={() => setWatchSubTab('STANDINGS')}
+                      onClick={() => {
+                        setWatchSubTab('STANDINGS');
+                        setPlayerStandingsTab(1);
+                      }}
                       className={`py-2 px-3 rounded-lg text-xs font-black uppercase transition-all flex items-center justify-center gap-1.5 ${
                         watchSubTab === 'STANDINGS'
                           ? 'bg-amber-400 text-slate-950 shadow-xs'
@@ -942,40 +949,14 @@ export const PlayerTournamentCenter: React.FC<PlayerTournamentCenterProps> = ({ 
                   {/* STANDINGS SUB-TAB */}
                   {watchSubTab === 'STANDINGS' && (
                     <div className="space-y-4">
-                  {/* Sub-tabs: ROUNDS vs FINAL RESULT */}
-                  <div className="flex bg-slate-800 p-1 rounded-xl gap-1 text-xs font-bold">
-                    <button
-                      onClick={() => setPlayerStandingsSubTab('ROUNDS')}
-                      className={`flex-1 py-1.5 rounded-lg text-center transition-all ${
-                        playerStandingsSubTab === 'ROUNDS'
-                          ? 'bg-amber-400 text-slate-950 shadow-md'
-                          : 'text-slate-400 hover:text-white'
-                      }`}
-                    >
-                      ROUNDS
-                    </button>
-                    <button
-                      onClick={() => setPlayerStandingsSubTab('FINAL_RESULT')}
-                      className={`flex-1 py-1.5 rounded-lg text-center transition-all ${
-                        playerStandingsSubTab === 'FINAL_RESULT'
-                          ? 'bg-amber-400 text-slate-950 shadow-md'
-                          : 'text-slate-400 hover:text-white'
-                      }`}
-                    >
-                      FINAL RESULTS
-                    </button>
-                  </div>
-
-                  {playerStandingsSubTab === 'ROUNDS' ? (
-                    <div className="space-y-3">
-                      {/* Round Selector Tabs */}
+                      {/* Standings Navigation: Round Tabs + Final Results */}
                       <div className="flex gap-1.5 overflow-x-auto pb-1 no-scrollbar">
                         {Array.from({ length: activeTournament.maxRounds || 3 }, (_, i) => i + 1).map((r) => (
                           <button
                             key={r}
-                            onClick={() => setPlayerSelectedRound(r)}
+                            onClick={() => setPlayerStandingsTab(r)}
                             className={`px-3 py-1.5 rounded-xl text-xs font-bold whitespace-nowrap transition-all ${
-                              playerSelectedRound === r
+                              playerStandingsTab === r
                                 ? 'bg-sky-500 text-slate-950 font-black'
                                 : 'bg-slate-800 text-slate-400 hover:bg-slate-750'
                             }`}
@@ -983,19 +964,32 @@ export const PlayerTournamentCenter: React.FC<PlayerTournamentCenterProps> = ({ 
                             Round {r}
                           </button>
                         ))}
+                        <button
+                          onClick={() => setPlayerStandingsTab('FINAL_RESULTS')}
+                          className={`px-3 py-1.5 rounded-xl text-xs font-bold whitespace-nowrap transition-all ${
+                            playerStandingsTab === 'FINAL_RESULTS'
+                              ? 'bg-sky-500 text-slate-950 font-black'
+                              : 'bg-slate-800 text-slate-400 hover:bg-slate-750'
+                          }`}
+                        >
+                          Final Results
+                        </button>
                       </div>
 
-                      {/* Groups inside selected round */}
-                      {(() => {
-                        const tournamentId = liveActiveTournament ? liveActiveTournament.id : activeTournament.id;
-                        const groups = db.getTournamentGroups(tournamentId).filter((g) => g.roundNumber === playerSelectedRound);
-                        if (groups.length === 0) {
-                          return (
-                            <div className="p-8 text-center text-slate-500 bg-slate-850 rounded-2xl border border-slate-800">
-                              No groups created for Round {playerSelectedRound} yet.
-                            </div>
-                          );
-                        }
+                      {playerStandingsTab !== 'FINAL_RESULTS' ? (
+                        <div className="space-y-3">
+                          {/* Groups inside selected round */}
+                          {(() => {
+                            const selectedRound = typeof playerStandingsTab === 'number' ? playerStandingsTab : 1;
+                            const tournamentId = liveActiveTournament ? liveActiveTournament.id : activeTournament.id;
+                            const groups = db.getTournamentGroups(tournamentId).filter((g) => g.roundNumber === selectedRound);
+                            if (groups.length === 0) {
+                              return (
+                                <div className="p-8 text-center text-slate-500 bg-slate-850 rounded-2xl border border-slate-800">
+                                  No groups created for Round {selectedRound} yet.
+                                </div>
+                              );
+                            }
                         const perfLabel = (liveActiveTournament || activeTournament).performanceLabel || 'Goals';
 
                         return groups.map((grp) => {
@@ -1435,20 +1429,22 @@ export const PlayerTournamentCenter: React.FC<PlayerTournamentCenterProps> = ({ 
                 </div>
 
                 <div>
-                  <label className="block text-slate-300 font-bold text-xs mb-1.5 flex items-center justify-between">
-                    <span>Your Phone Number</span>
-                    <span className="text-rose-400 text-[10px] uppercase font-bold">* Required for Activity</span>
+                  <label className="block text-slate-300 font-bold text-xs mb-1.5 flex items-center justify-between flex-wrap gap-1">
+                    <span>Your Verified Contact Number</span>
+                    <span className="text-emerald-400 text-[10px] uppercase font-bold flex items-center gap-1">
+                      <ShieldCheck className="w-3 h-3" /> Verified Identity
+                    </span>
                   </label>
-                  <input
-                    type="tel"
-                    required
-                    value={regPhoneNumber}
-                    onChange={(e) => setRegPhoneNumber(e.target.value)}
-                    placeholder="e.g. +251 91 234 5678 or 0911223344"
-                    className="w-full bg-slate-950 border border-slate-750 rounded-xl px-3 py-2 text-xs text-white font-mono placeholder-slate-500 focus:outline-hidden focus:border-sky-500"
-                  />
+
+                  <div className="w-full bg-slate-950 border border-slate-750 rounded-xl px-3 py-2 text-xs text-white font-mono flex items-center justify-between">
+                    <span className="font-semibold text-emerald-300">{user.phoneNumber || regPhoneNumber || 'Phone Verified'}</span>
+                    <span className="text-[10px] text-slate-400 font-sans">Identity Linked</span>
+                  </div>
                   <p className="text-[10px] text-slate-500 mt-1">
-                    Organizers need your phone number for match calls and payment confirmation.
+                    Organizers use your verified phone number for 1v1 match call-outs and payment verification.
+                  </p>
+                  <p className="text-[10px] text-emerald-400/90 flex items-center gap-1 mt-0.5 font-medium">
+                    <Shield className="w-3 h-3 shrink-0" /> Private • Only visible to this tournament's organizers
                   </p>
                 </div>
 

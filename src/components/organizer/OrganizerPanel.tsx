@@ -58,6 +58,11 @@ import {
   Key,
   Copy,
   Filter,
+  Mail,
+  Loader2,
+  Search,
+  UserCheck,
+  Shield,
 } from 'lucide-react';
 import { extractYouTubeVideoId } from '../../utils/youtube';
 
@@ -76,7 +81,7 @@ const parseEntryFeeNum = (feeStr?: string): number => {
 export const OrganizerRevenueBreakdownTable: React.FC<{ user: User }> = ({ user }) => {
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(10);
-  const orgTournaments = db.getOrganizerTournaments(user.id);
+  const orgTournaments = db.getOrganizerTournaments(user.id).filter((t) => db.isTournamentOwner(t, user.id));
   const tournamentEarningsList = orgTournaments.map((t) => {
     const players = db.getTournamentPlayers(t.id);
     const paidPlayers = players.filter((p) => p.paymentStatus === 'CONFIRMED');
@@ -172,7 +177,7 @@ const OrganizerEarningsView: React.FC<{
   const [withdrawTelebirrNumber, setWithdrawTelebirrNumber] = useState<string>('');
   const [isSubmitting, setIsSubmitting] = useState(false);
 
-  const orgTournaments = db.getOrganizerTournaments(user.id);
+  const orgTournaments = db.getOrganizerTournaments(user.id).filter((t) => db.isTournamentOwner(t, user.id));
   const myWithdrawalRequests = db.getOrganizerWithdrawalRequests(user.id);
   const [withdrawalPage, setWithdrawalPage] = useState(1);
   const [withdrawalPageSize, setWithdrawalPageSize] = useState(5);
@@ -778,6 +783,8 @@ export const OrganizerPanel: React.FC<OrganizerPanelProps> = ({ user }) => {
   }, []);
 
   const activeTournament = selectedDeskTourId ? db.getTournamentById(selectedDeskTourId) || null : null;
+  const isOwner = activeTournament ? db.isTournamentOwner(activeTournament, user.id) : false;
+  const isCoOrganizer = activeTournament ? db.isTournamentCoOrganizer(activeTournament, user.id) : false;
 
   const isTourCompleted = activeTournament?.status === 'Completed' || activeTournament?.status === 'Finished';
   const isTourOngoing = activeTournament?.status === 'Ongoing';
@@ -938,6 +945,166 @@ export const OrganizerPanel: React.FC<OrganizerPanelProps> = ({ user }) => {
     'https://images.unsplash.com/photo-1539571696357-5a69c17a67c6?w=150',
   ];
 
+  // Co-Organizer Management State
+  const [showAddCoOrgModal, setShowAddCoOrgModal] = useState(false);
+  const [coOrgLookupMethod, setCoOrgLookupMethod] = useState<'email' | 'telegram'>('email');
+  const [coOrgLookupValue, setCoOrgLookupValue] = useState('');
+  const [coOrgLookupLoading, setCoOrgLookupLoading] = useState(false);
+  const [coOrgLookupError, setCoOrgLookupError] = useState<string | null>(null);
+
+  const handleAddCoOrganizer = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!activeTournament) return;
+    if (!coOrgLookupValue.trim()) {
+      setCoOrgLookupError('Please enter an identifier to search.');
+      return;
+    }
+
+    setCoOrgLookupLoading(true);
+    setCoOrgLookupError(null);
+
+    try {
+      const foundUser = await db.findUserByLookup(coOrgLookupMethod, coOrgLookupValue.trim());
+      if (!foundUser) {
+        setCoOrgLookupError('No Awedadari user was found with that email/Telegram username.');
+        setCoOrgLookupLoading(false);
+        return;
+      }
+
+      await db.addCoOrganizerToTournament(activeTournament.id, foundUser.id);
+      showToast(`Added ${foundUser.name || foundUser.gamertag || 'user'} as co-organizer!`);
+      setShowAddCoOrgModal(false);
+      setCoOrgLookupValue('');
+      setCoOrgLookupError(null);
+    } catch (err: any) {
+      setCoOrgLookupError(err.message || 'Failed to add co-organizer.');
+    } finally {
+      setCoOrgLookupLoading(false);
+    }
+  };
+
+  const handleRemoveCoOrganizer = async (coOrgId: string) => {
+    if (!activeTournament) return;
+    const target = db.getUserById(coOrgId);
+    const targetName = target?.name || target?.gamertag || 'this co-organizer';
+    if (!window.confirm(`Are you sure you want to remove ${targetName} from the tournament management team?`)) {
+      return;
+    }
+
+    try {
+      await db.removeCoOrganizerFromTournament(activeTournament.id, coOrgId);
+      showToast(`Removed ${targetName} from tournament management team.`);
+    } catch (err: any) {
+      showToast(err.message || 'Failed to remove co-organizer.', 'error');
+    }
+  };
+
+  // Add Player State & Handlers
+  const [showAddPlayerModal, setShowAddPlayerModal] = useState(false);
+  const [addPlayerMode, setAddPlayerMode] = useState<'existing' | 'manual'>('existing');
+  const [addPlayerLookupMethod, setAddPlayerLookupMethod] = useState<'phone' | 'email' | 'telegram'>('phone');
+  const [addPlayerLookupValue, setAddPlayerLookupValue] = useState('');
+  const [addPlayerLookupLoading, setAddPlayerLookupLoading] = useState(false);
+  const [addPlayerFoundUser, setAddPlayerFoundUser] = useState<User | null>(null);
+  const [addPlayerLookupAttempted, setAddPlayerLookupAttempted] = useState(false);
+  const [addPlayerError, setAddPlayerError] = useState<string | null>(null);
+  const [addPlayerSubmitting, setAddPlayerSubmitting] = useState(false);
+
+  // Manual participant form fields
+  const [manualPlayerName, setManualPlayerName] = useState('');
+  const [manualPlayerPhone, setManualPlayerPhone] = useState('');
+  const [manualPlayerTelegram, setManualPlayerTelegram] = useState('');
+  const [manualPlayerEmail, setManualPlayerEmail] = useState('');
+
+  const resetAddPlayerState = () => {
+    setAddPlayerLookupValue('');
+    setAddPlayerFoundUser(null);
+    setAddPlayerLookupAttempted(false);
+    setAddPlayerError(null);
+    setManualPlayerName('');
+    setManualPlayerPhone('');
+    setManualPlayerTelegram('');
+    setManualPlayerEmail('');
+    setAddPlayerMode('existing');
+  };
+
+  const handleSearchExistingUser = async (e?: React.FormEvent) => {
+    if (e) e.preventDefault();
+    if (!activeTournament) return;
+    const query = addPlayerLookupValue.trim();
+    if (!query) {
+      setAddPlayerError('Please enter a phone number, email, or Telegram username to search.');
+      return;
+    }
+
+    setAddPlayerLookupLoading(true);
+    setAddPlayerError(null);
+    setAddPlayerFoundUser(null);
+    setAddPlayerLookupAttempted(true);
+
+    try {
+      const found = await db.findUserByLookup(addPlayerLookupMethod, query, activeTournament.id);
+      if (!found) {
+        setAddPlayerFoundUser(null);
+      } else {
+        setAddPlayerFoundUser(found);
+      }
+    } catch (err: any) {
+      setAddPlayerError(err.message || 'Error searching for user.');
+    } finally {
+      setAddPlayerLookupLoading(false);
+    }
+  };
+
+  const handleAddExistingUserPlayer = async () => {
+    if (!activeTournament || !addPlayerFoundUser) return;
+    setAddPlayerSubmitting(true);
+    setAddPlayerError(null);
+
+    try {
+      const res = await db.manuallyAddPlayerToTournament({
+        tournamentId: activeTournament.id,
+        userId: addPlayerFoundUser.id,
+      });
+      showToast(res.message || 'Player successfully added!');
+      setShowAddPlayerModal(false);
+      resetAddPlayerState();
+    } catch (err: any) {
+      setAddPlayerError(err.message || 'Failed to add player to tournament.');
+    } finally {
+      setAddPlayerSubmitting(false);
+    }
+  };
+
+  const handleAddManualParticipant = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!activeTournament) return;
+    if (!manualPlayerName.trim()) {
+      setAddPlayerError('Please enter the participant full name.');
+      return;
+    }
+
+    setAddPlayerSubmitting(true);
+    setAddPlayerError(null);
+
+    try {
+      const res = await db.manuallyAddPlayerToTournament({
+        tournamentId: activeTournament.id,
+        name: manualPlayerName.trim(),
+        phoneNumber: manualPlayerPhone.trim() || undefined,
+        telegramUsername: manualPlayerTelegram.trim() || undefined,
+        email: manualPlayerEmail.trim() || undefined,
+      });
+      showToast(res.message || 'Participant registered!');
+      setShowAddPlayerModal(false);
+      resetAddPlayerState();
+    } catch (err: any) {
+      setAddPlayerError(err.message || 'Failed to register participant.');
+    } finally {
+      setAddPlayerSubmitting(false);
+    }
+  };
+
   // Open a tournament desk
   const handleOpenManagerDesk = (tourId: string) => {
     setSelectedDeskTourId(tourId);
@@ -1075,7 +1242,7 @@ export const OrganizerPanel: React.FC<OrganizerPanelProps> = ({ user }) => {
       youtubeStreamUrl: formYoutubeUrl.trim(),
     };
 
-    if (!activeTournament.isApproved) {
+    if (!activeTournament.isApproved && isOwner) {
       updateFields.telebirrNumber = formTelebirr;
       updateFields.telebirrAccountName = formTelebirrName;
     }
@@ -1249,7 +1416,7 @@ export const OrganizerPanel: React.FC<OrganizerPanelProps> = ({ user }) => {
     groupId: string,
     userId: string,
     currentGroup: TournamentGroup,
-    status: 'Waiting' | 'Qualified' | 'Eliminated' | 'Champion'
+    status: 'Waiting' | 'Qualified' | 'Eliminated'
   ) => {
     const statuses = { ...(currentGroup.playerStatuses || {}) };
     statuses[userId] = status;
@@ -1481,23 +1648,30 @@ export const OrganizerPanel: React.FC<OrganizerPanelProps> = ({ user }) => {
                                 </div>
 
                                 {/* Status Badge */}
-                                {!t.isApproved ? (
-                                  <span className="px-2 py-0.5 bg-amber-500/20 text-amber-300 font-extrabold text-[10px] rounded-full border border-amber-500/30">
-                                    Pending Approval
-                                  </span>
-                                ) : t.status === 'Ongoing' || t.status === 'Live' ? (
-                                  <span className="px-2 py-0.5 bg-emerald-500/20 text-emerald-300 font-extrabold text-[10px] rounded-full border border-emerald-500/30">
-                                    Ongoing
-                                  </span>
-                                ) : t.status === 'Completed' || t.status === 'Finished' ? (
-                                  <span className="px-2 py-0.5 bg-slate-800 text-slate-400 font-extrabold text-[10px] rounded-full">
-                                    Finished
-                                  </span>
-                                ) : (
-                                  <span className="px-2 py-0.5 bg-sky-500/20 text-sky-300 font-extrabold text-[10px] rounded-full border border-sky-500/30">
-                                    Registration Open
-                                  </span>
-                                )}
+                                <div className="flex items-center gap-1.5 flex-wrap justify-end">
+                                  {!db.isTournamentOwner(t, user.id) && db.isTournamentCoOrganizer(t, user.id) && (
+                                    <span className="px-2 py-0.5 bg-sky-500/20 text-sky-300 font-extrabold text-[10px] rounded-full border border-sky-500/30">
+                                      Co-organizer
+                                    </span>
+                                  )}
+                                  {!t.isApproved ? (
+                                    <span className="px-2 py-0.5 bg-amber-500/20 text-amber-300 font-extrabold text-[10px] rounded-full border border-amber-500/30">
+                                      Pending Approval
+                                    </span>
+                                  ) : t.status === 'Ongoing' || t.status === 'Live' ? (
+                                    <span className="px-2 py-0.5 bg-emerald-500/20 text-emerald-300 font-extrabold text-[10px] rounded-full border border-emerald-500/30">
+                                      Ongoing
+                                    </span>
+                                  ) : t.status === 'Completed' || t.status === 'Finished' ? (
+                                    <span className="px-2 py-0.5 bg-slate-800 text-slate-400 font-extrabold text-[10px] rounded-full">
+                                      Finished
+                                    </span>
+                                  ) : (
+                                    <span className="px-2 py-0.5 bg-sky-500/20 text-sky-300 font-extrabold text-[10px] rounded-full border border-sky-500/30">
+                                      Registration Open
+                                    </span>
+                                  )}
+                                </div>
                               </div>
 
                               <h3 className="font-black text-white text-sm truncate mt-0.5 group-hover:text-sky-300 transition-colors">
@@ -1516,9 +1690,10 @@ export const OrganizerPanel: React.FC<OrganizerPanelProps> = ({ user }) => {
                           </div>
 
                           {(() => {
+                            const isTourOwner = db.isTournamentOwner(t, user.id);
                             const registeredPlayersCount = db.getTournamentPlayers(t.id).length;
                             const isRegistrationOpen = t.status === 'Registration Open' || t.status === 'Upcoming';
-                            const canDelete = isRegistrationOpen && registeredPlayersCount === 0;
+                            const canDelete = isTourOwner && isRegistrationOpen && registeredPlayersCount === 0;
 
                             return (
                               <div className="pt-2 border-t border-slate-800 flex flex-col gap-1 text-xs">
@@ -1527,37 +1702,39 @@ export const OrganizerPanel: React.FC<OrganizerPanelProps> = ({ user }) => {
                                     Players: <strong className="text-white">{registeredPlayersCount}</strong> / {t.maxPlayers}
                                   </span>
                                   <div className="flex items-center gap-2">
-                                    <button
-                                      disabled={!canDelete}
-                                      onClick={(e) => {
-                                        e.stopPropagation();
-                                        if (!canDelete) {
-                                          if (registeredPlayersCount > 0) {
-                                            showToast('This tournament cannot be deleted because players have already registered.', 'error');
-                                          } else {
-                                            showToast('This tournament cannot be deleted unless status is Registration Open.', 'error');
+                                    {isTourOwner && (
+                                      <button
+                                        disabled={!canDelete}
+                                        onClick={(e) => {
+                                          e.stopPropagation();
+                                          if (!canDelete) {
+                                            if (registeredPlayersCount > 0) {
+                                              showToast('This tournament cannot be deleted because players have already registered.', 'error');
+                                            } else {
+                                              showToast('This tournament cannot be deleted unless status is Registration Open.', 'error');
+                                            }
+                                            return;
                                           }
-                                          return;
+                                          if (window.confirm(`Are you sure you want to permanently delete your tournament "${t.tournamentName}"?`)) {
+                                            db.deleteTournament(t.id);
+                                          }
+                                        }}
+                                        className={`p-1.5 rounded-xl border transition-all ${
+                                          canDelete
+                                            ? 'bg-rose-500/10 hover:bg-rose-500/20 text-rose-400 border-rose-500/30 active:scale-95'
+                                            : 'bg-slate-800/40 text-slate-600 border-slate-800/80 cursor-not-allowed opacity-50'
+                                        }`}
+                                        title={
+                                          registeredPlayersCount > 0
+                                            ? 'This tournament cannot be deleted because players have already registered.'
+                                            : !isRegistrationOpen
+                                            ? 'This tournament cannot be deleted unless status is Registration Open.'
+                                            : 'Delete Tournament'
                                         }
-                                        if (window.confirm(`Are you sure you want to permanently delete your tournament "${t.tournamentName}"?`)) {
-                                          db.deleteTournament(t.id);
-                                        }
-                                      }}
-                                      className={`p-1.5 rounded-xl border transition-all ${
-                                        canDelete
-                                          ? 'bg-rose-500/10 hover:bg-rose-500/20 text-rose-400 border-rose-500/30 active:scale-95'
-                                          : 'bg-slate-800/40 text-slate-600 border-slate-800/80 cursor-not-allowed opacity-50'
-                                      }`}
-                                      title={
-                                        registeredPlayersCount > 0
-                                          ? 'This tournament cannot be deleted because players have already registered.'
-                                          : !isRegistrationOpen
-                                          ? 'This tournament cannot be deleted unless status is Registration Open.'
-                                          : 'Delete Tournament'
-                                      }
-                                    >
-                                      <Trash2 className="w-4 h-4" />
-                                    </button>
+                                      >
+                                        <Trash2 className="w-4 h-4" />
+                                      </button>
+                                    )}
                                     <span className="text-sky-400 font-black flex items-center gap-1 group-hover:translate-x-1 transition-transform">
                                       Open Manager Desk <ChevronRight className="w-4 h-4" />
                                     </span>
@@ -1969,6 +2146,15 @@ export const OrganizerPanel: React.FC<OrganizerPanelProps> = ({ user }) => {
               </div>
 
               <div className="flex items-center gap-2">
+                {isOwner ? (
+                  <span className="px-2.5 py-1 bg-amber-500/20 text-amber-300 font-extrabold text-[11px] rounded-full border border-amber-500/30">
+                    Owner
+                  </span>
+                ) : (
+                  <span className="px-2.5 py-1 bg-sky-500/20 text-sky-300 font-extrabold text-[11px] rounded-full border border-sky-500/30">
+                    Co-organizer
+                  </span>
+                )}
                 {!activeTournament.isApproved ? (
                   <span className="px-3 py-1 bg-amber-500/20 text-amber-300 font-black text-xs rounded-full border border-amber-500/30">
                     Pending Admin Approval
@@ -2396,12 +2582,24 @@ export const OrganizerPanel: React.FC<OrganizerPanelProps> = ({ user }) => {
                     <p className="text-[11px] text-slate-400">View registered player roster, payment approval status & verify codes</p>
                   </div>
 
-                  <button
-                    onClick={() => setInviteModalTour(activeTournament)}
-                    className="px-3 py-1.5 bg-amber-500/10 text-amber-300 border border-amber-500/30 rounded-xl font-bold text-xs flex items-center gap-1 hover:bg-amber-500/20 transition-colors shrink-0"
-                  >
-                    <Share2 className="w-3.5 h-3.5" /> Invite Link
-                  </button>
+                  <div className="flex items-center gap-2 shrink-0">
+                    <button
+                      onClick={() => {
+                        resetAddPlayerState();
+                        setShowAddPlayerModal(true);
+                      }}
+                      className="px-3 py-1.5 bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 rounded-xl font-bold text-xs flex items-center gap-1.5 hover:bg-emerald-500/20 transition-colors shadow-xs"
+                    >
+                      <UserPlus className="w-3.5 h-3.5" /> + Add Player
+                    </button>
+
+                    <button
+                      onClick={() => setInviteModalTour(activeTournament)}
+                      className="px-3 py-1.5 bg-amber-500/10 text-amber-300 border border-amber-500/30 rounded-xl font-bold text-xs flex items-center gap-1 hover:bg-amber-500/20 transition-colors shrink-0"
+                    >
+                      <Share2 className="w-3.5 h-3.5" /> Invite Link
+                    </button>
+                  </div>
                 </div>
 
                 {/* Organizer Code Check-In Box (Requirement 3) */}
@@ -2459,144 +2657,305 @@ export const OrganizerPanel: React.FC<OrganizerPanelProps> = ({ user }) => {
                       No players registered for this tournament yet.
                     </p>
                   ) : (
-                    db.getTournamentPlayers(activeTournament.id).map((tp) => (
-                      <div
-                        key={tp.userId}
-                        onClick={() => {
-                          const userObj = tp.user || db.getUserById(tp.userId);
-                          if (userObj) setSelectedUserForDetail(userObj);
-                        }}
-                        className="p-3.5 bg-slate-900 hover:bg-slate-850 rounded-2xl border border-slate-800 hover:border-sky-500/40 flex flex-col gap-3 text-xs transition-colors cursor-pointer"
-                      >
-                        <div className="flex items-center justify-between gap-3">
-                          <div className="flex items-center gap-3">
-                            <img
-                              src={tp.user?.profileImage || 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=150'}
-                              alt=""
-                              className="w-10 h-10 rounded-full object-cover border border-slate-700 shrink-0"
-                            />
-                            <div>
-                              <div className="flex items-center gap-2">
-                                <h4 className="font-extrabold text-white hover:text-sky-300 transition-colors">{tp.user?.name || tp.userId}</h4>
-                                <span className="text-[10px] text-sky-400 font-mono">@{tp.user?.gamertag || 'gamer'}</span>
-                                {tp.user?.teamName && (
-                                  <span className="px-2 py-0.5 bg-amber-500/10 text-amber-300 font-bold text-[10px] rounded-full border border-amber-500/20">
-                                    {tp.user.teamName}
-                                  </span>
-                                )}
+                    db.getTournamentPlayers(activeTournament.id).map((tp) => {
+                      const playerIdentifier = tp.userId || tp.id || '';
+                      const userObj = tp.user || (tp.userId ? db.getUserById(tp.userId) : undefined);
+                      const displayName = userObj?.name || tp.name || tp.userId || 'Participant';
+
+                      return (
+                        <div
+                          key={tp.id || tp.userId || tp.checkInCode}
+                          onClick={() => {
+                            if (userObj) setSelectedUserForDetail(userObj);
+                          }}
+                          className="p-3.5 bg-slate-900 hover:bg-slate-850 rounded-2xl border border-slate-800 hover:border-sky-500/40 flex flex-col gap-3 text-xs transition-colors cursor-pointer"
+                        >
+                          <div className="flex items-center justify-between gap-3">
+                            <div className="flex items-center gap-3">
+                              <img
+                                src={userObj?.profileImage || tp.user?.profileImage || 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=150'}
+                                alt=""
+                                className="w-10 h-10 rounded-full object-cover border border-slate-700 shrink-0"
+                              />
+                              <div>
+                                <div className="flex items-center gap-2">
+                                  <h4 className="font-extrabold text-white hover:text-sky-300 transition-colors">
+                                    {displayName}
+                                  </h4>
+                                  {tp.userId ? (
+                                    <span className="text-[10px] text-sky-400 font-mono">
+                                      @{userObj?.gamertag || userObj?.username || 'gamer'}
+                                    </span>
+                                  ) : (
+                                    <span className="px-1.5 py-0.5 bg-purple-500/15 text-purple-300 border border-purple-500/25 rounded font-bold text-[9px]">
+                                      Manual
+                                    </span>
+                                  )}
+                                  {userObj?.teamName && (
+                                    <span className="px-2 py-0.5 bg-amber-500/10 text-amber-300 font-bold text-[10px] rounded-full border border-amber-500/20">
+                                      {userObj.teamName}
+                                    </span>
+                                  )}
+                                </div>
+                                <div className="flex flex-wrap items-center gap-2 mt-0.5">
+                                  <p className="text-[10px] text-slate-400">
+                                    Code: <span className="font-mono text-amber-300 font-extrabold">{tp.checkInCode ? tp.checkInCode.replace(/^SG-/, '') : '----'}</span>
+                                  </p>
+                                  {tp.phoneNumber && (
+                                    <span className="text-[10px] text-slate-400 flex items-center gap-0.5">
+                                      <Phone className="w-2.5 h-2.5 text-slate-500" /> {tp.phoneNumber}
+                                    </span>
+                                  )}
+                                  {tp.telegramUsername && (
+                                    <span className="text-[10px] text-sky-400/90 font-mono">
+                                      {tp.telegramUsername}
+                                    </span>
+                                  )}
+                                </div>
                               </div>
-                              <p className="text-[10px] text-slate-400 mt-0.5">
-                                Code: <span className="font-mono text-amber-300 font-extrabold">{tp.checkInCode.replace(/^SG-/, '')}</span>
-                              </p>
+                            </div>
+
+                            <span
+                              className={`px-2.5 py-1 rounded-full text-[10px] font-black uppercase ${
+                                tp.playerStatus === 'Checked In'
+                                  ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30'
+                                  : 'bg-sky-500/20 text-sky-300 border border-sky-500/30'
+                              }`}
+                            >
+                              {tp.playerStatus}
+                            </span>
+                          </div>
+
+                          {/* Payment Verification & Actions Row */}
+                          <div className="pt-2 border-t border-slate-850 flex flex-wrap items-center justify-between gap-2" onClick={(e) => e.stopPropagation()}>
+                            {/* Payment status badge */}
+                            <div className="flex items-center gap-2">
+                              {tp.paymentStatus === 'PENDING_APPROVAL' && (
+                                <span className="text-[10px] text-amber-400 font-bold flex items-center gap-1 bg-amber-500/10 px-2 py-0.5 rounded border border-amber-500/20">
+                                  <Clock className="w-3 h-3" /> Pending Admin Approval
+                                </span>
+                              )}
+
+                              {tp.paymentStatus === 'CONFIRMED' && (
+                                <span className="text-[10px] text-emerald-400 font-bold flex items-center gap-1 bg-emerald-500/10 px-2 py-0.5 rounded border border-emerald-500/20">
+                                  <CheckCircle2 className="w-3 h-3" /> Payment Approved
+                                </span>
+                              )}
+
+                              {tp.paymentStatus === 'REJECTED' && (
+                                <span className="text-[10px] text-rose-400 font-bold flex items-center gap-1 bg-rose-500/10 px-2 py-0.5 rounded border border-rose-500/20">
+                                  <AlertCircle className="w-3 h-3" /> Payment Rejected
+                                </span>
+                              )}
+
+                              {(!tp.paymentStatus || (tp.paymentStatus as string) === 'UNPAID') && (
+                                <span className="text-[10px] text-slate-400 font-bold flex items-center gap-1 bg-slate-800 px-2 py-0.5 rounded border border-slate-700">
+                                  Unpaid
+                                </span>
+                              )}
+                            </div>
+
+                            {/* Check-In & Remove Actions */}
+                            <div className="flex items-center gap-2">
+                              {(() => {
+                                const isApprovedByAdmin = tp.paymentStatus === 'CONFIRMED';
+                                const isCheckedIn = tp.playerStatus === 'Checked In';
+                                const isLocked = isTourOngoing || isTourCompleted;
+
+                                return (
+                                  <button
+                                    disabled={isLocked || (!isCheckedIn && !isApprovedByAdmin)}
+                                    onClick={async (e) => {
+                                      e.stopPropagation();
+                                      if (isLocked) {
+                                        showToast('Cannot change check-in status after tournament has started.', 'error');
+                                        return;
+                                      }
+                                      if (!isCheckedIn && !isApprovedByAdmin) {
+                                        showToast('Player registration must first be approved by the Admin before check-in.', 'error');
+                                        return;
+                                      }
+                                      const newStatus: PlayerStatus = isCheckedIn ? 'Registered' : 'Checked In';
+                                      await db.updatePlayerStatus(activeTournament.id, playerIdentifier, newStatus);
+                                      showToast(newStatus === 'Checked In' ? 'Player Marked Checked-In!' : 'Check-in reset');
+                                    }}
+                                    className={`px-3 py-1 rounded-lg font-black text-[10px] uppercase transition-all ${
+                                      isLocked
+                                        ? 'bg-slate-800/40 text-slate-500 cursor-not-allowed border border-slate-750/60 opacity-60'
+                                        : isCheckedIn
+                                        ? 'bg-emerald-500 text-slate-950 shadow-xs'
+                                        : isApprovedByAdmin
+                                        ? 'bg-slate-800 text-slate-300 hover:bg-slate-750'
+                                        : 'bg-slate-800/40 text-slate-500 cursor-not-allowed border border-slate-750/60 opacity-60'
+                                    }`}
+                                    title={
+                                      isLocked
+                                        ? 'Check-in status is locked after tournament has started.'
+                                        : !isCheckedIn && !isApprovedByAdmin
+                                        ? 'Player registration must first be approved by the Admin before check-in.'
+                                        : ''
+                                    }
+                                  >
+                                    {isCheckedIn ? 'Checked In ✓' : isLocked ? 'Locked' : 'Mark Checked-In'}
+                                  </button>
+                                );
+                              })()}
+
+                              {!isTourOngoing && !isTourCompleted && (
+                                <button
+                                  onClick={async (e) => {
+                                    e.stopPropagation();
+                                    if (confirm(`Remove ${displayName} from tournament?`)) {
+                                      await db.removePlayerFromTournament(activeTournament.id, playerIdentifier);
+                                      showToast('Player removed from tournament');
+                                    }
+                                  }}
+                                  className="px-2 py-1 bg-rose-500/10 hover:bg-rose-500/20 text-rose-400 border border-rose-500/20 rounded-lg font-bold text-[10px]"
+                                  title="Remove player"
+                                >
+                                  Remove
+                                </button>
+                              )}
+                            </div>
+                          </div>
+                        </div>
+                      );
+                    })
+                  )}
+                </div>
+              </div>
+
+              {/* TOURNAMENT ORGANIZERS / TEAM SECTION */}
+              <div className="bg-slate-850 border border-slate-750 rounded-3xl p-5 space-y-4 shadow-md">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-slate-800 pb-3">
+                  <div>
+                    <h3 className="font-extrabold text-white text-sm flex items-center gap-2">
+                      <Users className="w-4 h-4 text-amber-400" />
+                      Tournament Organizers
+                    </h3>
+                    <p className="text-[11px] text-slate-400">
+                      Authorized team members managing this tournament
+                    </p>
+                  </div>
+
+                  {isOwner && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setShowAddCoOrgModal(true);
+                        setCoOrgLookupValue('');
+                        setCoOrgLookupError(null);
+                      }}
+                      className="px-3 py-1.5 bg-amber-500 hover:bg-amber-400 text-slate-950 font-black text-xs rounded-xl flex items-center gap-1.5 shadow-sm transition-all self-start sm:self-auto"
+                    >
+                      <UserPlus className="w-3.5 h-3.5" />
+                      <span>+ Add Organizer</span>
+                    </button>
+                  )}
+                </div>
+
+                {/* Organizers List */}
+                <div className="space-y-2.5">
+                  {/* 1. Original Creator (Owner) */}
+                  {(() => {
+                    const ownerUser = db.getUserById(activeTournament.organizerId);
+                    const ownerName = ownerUser?.name || ownerUser?.gamertag || 'Tournament Creator';
+                    const ownerImage = ownerUser?.profileImage || 'https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?w=150';
+                    const ownerContact = ownerUser?.email || (ownerUser?.telegramUserId ? `@${String(ownerUser.telegramUserId).replace(/^@/, '')}` : (ownerUser?.username ? `@${ownerUser.username}` : null));
+
+                    return (
+                      <div className="flex items-center justify-between p-3 rounded-2xl bg-slate-900 border border-slate-800">
+                        <div className="flex items-center gap-3 min-w-0">
+                          <img
+                            src={ownerImage}
+                            alt={ownerName}
+                            className="w-9 h-9 rounded-xl object-cover border border-slate-700 shrink-0"
+                          />
+                          <div className="min-w-0">
+                            <div className="flex items-center gap-2">
+                              <span className="text-xs font-black text-white truncate">{ownerName}</span>
+                              <span className="px-2 py-0.5 bg-amber-500/20 text-amber-300 border border-amber-500/30 text-[10px] font-black rounded-full">
+                                Owner
+                              </span>
+                            </div>
+                            {ownerContact && (
+                              <p className="text-[10px] text-slate-400 truncate">{ownerContact}</p>
+                            )}
+                          </div>
+                        </div>
+                        <span className="text-[11px] text-slate-500 font-medium shrink-0">Creator</span>
+                      </div>
+                    );
+                  })()}
+
+                  {/* 2. Co-Organizers */}
+                  {(() => {
+                    const coOrgIds = (activeTournament.coOrganizerIds || []).filter((id) => {
+                      const cleanCid = id.replace(/^user_/, '').replace(/^tg_/, '');
+                      const cleanOrg = activeTournament.organizerId.replace(/^user_/, '').replace(/^tg_/, '');
+                      return cleanCid !== cleanOrg;
+                    });
+
+                    const uniqueCoOrgUsers: { id: string; user?: User }[] = [];
+                    const seenUids = new Set<string>();
+
+                    for (const cid of coOrgIds) {
+                      const u = db.getUserById(cid);
+                      const key = u?.id || cid.replace(/^user_/, '').replace(/^tg_/, '');
+                      if (!seenUids.has(key)) {
+                        seenUids.add(key);
+                        uniqueCoOrgUsers.push({ id: cid, user: u });
+                      }
+                    }
+
+                    if (uniqueCoOrgUsers.length === 0) {
+                      return (
+                        <p className="text-[11px] text-slate-500 italic p-3 text-center bg-slate-900/50 rounded-2xl border border-slate-800/60">
+                          No co-organizers added yet. The tournament owner can add approved organizers.
+                        </p>
+                      );
+                    }
+
+                    return uniqueCoOrgUsers.map(({ id: coOrgId, user: coOrgUser }) => {
+                      const name = coOrgUser?.name || coOrgUser?.gamertag || 'Approved Organizer';
+                      const img = coOrgUser?.profileImage || 'https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?w=150';
+                      const contact = coOrgUser?.email || (coOrgUser?.telegramUserId ? `@${String(coOrgUser.telegramUserId).replace(/^@/, '')}` : (coOrgUser?.username ? `@${coOrgUser.username}` : null));
+
+                      return (
+                        <div key={coOrgId} className="flex items-center justify-between p-3 rounded-2xl bg-slate-900 border border-slate-800">
+                          <div className="flex items-center gap-3 min-w-0">
+                            <img
+                              src={img}
+                              alt={name}
+                              className="w-9 h-9 rounded-xl object-cover border border-slate-700 shrink-0"
+                            />
+                            <div className="min-w-0">
+                              <div className="flex items-center gap-2">
+                                <span className="text-xs font-bold text-white truncate">{name}</span>
+                                <span className="px-2 py-0.5 bg-sky-500/20 text-sky-300 border border-sky-500/30 text-[10px] font-bold rounded-full">
+                                  Organizer
+                                </span>
+                              </div>
+                              {contact && (
+                                <p className="text-[10px] text-slate-400 truncate">{contact}</p>
+                              )}
                             </div>
                           </div>
 
-                          <span
-                            className={`px-2.5 py-1 rounded-full text-[10px] font-black uppercase ${
-                              tp.playerStatus === 'Checked In'
-                                ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30'
-                                : 'bg-sky-500/20 text-sky-300 border border-sky-500/30'
-                            }`}
-                          >
-                            {tp.playerStatus}
-                          </span>
+                          {isOwner && (
+                            <button
+                              type="button"
+                              onClick={() => handleRemoveCoOrganizer(coOrgUser?.id || coOrgId)}
+                              className="px-2.5 py-1 text-rose-400 hover:text-rose-300 bg-rose-500/10 hover:bg-rose-500/20 border border-rose-500/30 text-[10px] font-bold rounded-xl transition-all"
+                              title="Remove co-organizer"
+                            >
+                              Remove
+                            </button>
+                          )}
                         </div>
-
-                        {/* Payment Verification & Actions Row */}
-                        <div className="pt-2 border-t border-slate-850 flex flex-wrap items-center justify-between gap-2" onClick={(e) => e.stopPropagation()}>
-                          {/* Payment status badge */}
-                          <div className="flex items-center gap-2">
-                            {tp.paymentStatus === 'PENDING_APPROVAL' && (
-                              <span className="text-[10px] text-amber-400 font-bold flex items-center gap-1 bg-amber-500/10 px-2 py-0.5 rounded border border-amber-500/20">
-                                <Clock className="w-3 h-3" /> Pending Admin Approval
-                              </span>
-                            )}
-
-                            {tp.paymentStatus === 'CONFIRMED' && (
-                              <span className="text-[10px] text-emerald-400 font-bold flex items-center gap-1 bg-emerald-500/10 px-2 py-0.5 rounded border border-emerald-500/20">
-                                <CheckCircle2 className="w-3 h-3" /> Payment Approved
-                              </span>
-                            )}
-
-                            {tp.paymentStatus === 'REJECTED' && (
-                              <span className="text-[10px] text-rose-400 font-bold flex items-center gap-1 bg-rose-500/10 px-2 py-0.5 rounded border border-rose-500/20">
-                                <AlertCircle className="w-3 h-3" /> Payment Rejected
-                              </span>
-                            )}
-
-                            {(!tp.paymentStatus || (tp.paymentStatus as string) === 'UNPAID') && (
-                              <span className="text-[10px] text-slate-400 font-bold flex items-center gap-1 bg-slate-800 px-2 py-0.5 rounded border border-slate-700">
-                                Unpaid
-                              </span>
-                            )}
-                          </div>
-
-                          {/* Check-In & Remove Actions */}
-                          <div className="flex items-center gap-2">
-                            {(() => {
-                              const isApprovedByAdmin = tp.paymentStatus === 'CONFIRMED';
-                              const isCheckedIn = tp.playerStatus === 'Checked In';
-                              const isLocked = isTourOngoing || isTourCompleted;
-
-                              return (
-                                <button
-                                  disabled={isLocked || (!isCheckedIn && !isApprovedByAdmin)}
-                                  onClick={async (e) => {
-                                    e.stopPropagation();
-                                    if (isLocked) {
-                                      showToast('Cannot change check-in status after tournament has started.', 'error');
-                                      return;
-                                    }
-                                    if (!isCheckedIn && !isApprovedByAdmin) {
-                                      showToast('Player registration must first be approved by the Admin before check-in.', 'error');
-                                      return;
-                                    }
-                                    const newStatus: PlayerStatus = isCheckedIn ? 'Registered' : 'Checked In';
-                                    await db.updatePlayerStatus(activeTournament.id, tp.userId, newStatus);
-                                    showToast(newStatus === 'Checked In' ? 'Player Marked Checked-In!' : 'Check-in reset');
-                                  }}
-                                  className={`px-3 py-1 rounded-lg font-black text-[10px] uppercase transition-all ${
-                                    isLocked
-                                      ? 'bg-slate-800/40 text-slate-500 cursor-not-allowed border border-slate-750/60 opacity-60'
-                                      : isCheckedIn
-                                      ? 'bg-emerald-500 text-slate-950 shadow-xs'
-                                      : isApprovedByAdmin
-                                      ? 'bg-slate-800 text-slate-300 hover:bg-slate-750'
-                                      : 'bg-slate-800/40 text-slate-500 cursor-not-allowed border border-slate-750/60 opacity-60'
-                                  }`}
-                                  title={
-                                    isLocked
-                                      ? 'Check-in status is locked after tournament has started.'
-                                      : !isCheckedIn && !isApprovedByAdmin
-                                      ? 'Player registration must first be approved by the Admin before check-in.'
-                                      : ''
-                                  }
-                                >
-                                  {isCheckedIn ? 'Checked In ✓' : isLocked ? 'Locked' : 'Mark Checked-In'}
-                                </button>
-                              );
-                            })()}
-
-                            {!isTourOngoing && !isTourCompleted && (
-                              <button
-                                onClick={async (e) => {
-                                  e.stopPropagation();
-                                  if (confirm(`Remove ${tp.user?.name || 'player'} from tournament?`)) {
-                                    await db.removePlayerFromTournament(activeTournament.id, tp.userId);
-                                    showToast('Player removed from tournament');
-                                  }
-                                }}
-                                className="px-2 py-1 bg-rose-500/10 hover:bg-rose-500/20 text-rose-400 border border-rose-500/20 rounded-lg font-bold text-[10px]"
-                                title="Remove player"
-                              >
-                                Remove
-                              </button>
-                            )}
-                          </div>
-                        </div>
-                      </div>
-                    ))
-                  )}
+                      );
+                    });
+                  })()}
                 </div>
               </div>
             </div>
@@ -3116,26 +3475,60 @@ export const OrganizerPanel: React.FC<OrganizerPanelProps> = ({ user }) => {
 
                             {/* Player Assignment checkboxes */}
                             <div className="space-y-1">
-                              <span className="text-[10px] text-slate-400 font-bold block">Assign Registered Players to {grp.groupName}:</span>
-                              <div className="flex flex-wrap gap-1.5 max-h-28 overflow-y-auto p-2 bg-slate-850 rounded-xl border border-slate-800 text-xs">
-                                {registeredPlayers.map((tp) => {
-                                  const isAssigned = grp.playerIds.includes(tp.userId);
-                                  return (
-                                    <button
-                                      key={tp.userId}
-                                      onClick={() => handleTogglePlayerInGroup(grp.id, tp.userId, grp)}
-                                      className={`px-2.5 py-1 rounded-lg text-[11px] font-bold border transition-all ${
-                                        isAssigned
-                                          ? 'bg-amber-500 text-slate-950 border-amber-400 font-black'
-                                          : 'bg-slate-900 text-slate-400 border-slate-800 hover:text-white'
-                                      }`}
-                                    >
-                                      {isAssigned ? '✓ ' : '+ '}
-                                      {tp.user?.name || tp.userId}
-                                    </button>
+                              <span className="text-[10px] text-slate-400 font-bold block">
+                                {selectedStandingsRound <= 1
+                                  ? `Assign Registered Players to ${grp.groupName}:`
+                                  : `Assign Qualified Round ${selectedStandingsRound - 1} Players to ${grp.groupName}:`}
+                              </span>
+                              {(() => {
+                                const eligiblePlayers = (() => {
+                                  if (selectedStandingsRound <= 1) {
+                                    return registeredPlayers;
+                                  }
+                                  const prevRoundGroups = db.getTournamentGroups(activeTournament.id).filter(
+                                    (g) => (g.roundNumber || 1) === selectedStandingsRound - 1
                                   );
-                                })}
-                              </div>
+                                  const qualifiedIds = new Set<string>();
+                                  prevRoundGroups.forEach((g) => {
+                                    Object.entries(g.playerStatuses || {}).forEach(([uid, status]) => {
+                                      if (status === 'Qualified') {
+                                        qualifiedIds.add(uid);
+                                      }
+                                    });
+                                  });
+                                  return registeredPlayers.filter((tp) => qualifiedIds.has(tp.userId));
+                                })();
+
+                                if (selectedStandingsRound > 1 && eligiblePlayers.length === 0) {
+                                  return (
+                                    <div className="p-2.5 bg-slate-850 rounded-xl border border-amber-500/30 text-[11px] text-amber-300">
+                                      ⚠️ No players are marked as <strong>Qualified</strong> in Round {selectedStandingsRound - 1} yet. Mark advancing players as "Qualified" in Round {selectedStandingsRound - 1} to assign them here.
+                                    </div>
+                                  );
+                                }
+
+                                return (
+                                  <div className="flex flex-wrap gap-1.5 max-h-28 overflow-y-auto p-2 bg-slate-850 rounded-xl border border-slate-800 text-xs">
+                                    {eligiblePlayers.map((tp) => {
+                                      const isAssigned = grp.playerIds.includes(tp.userId);
+                                      return (
+                                        <button
+                                          key={tp.userId}
+                                          onClick={() => handleTogglePlayerInGroup(grp.id, tp.userId, grp)}
+                                          className={`px-2.5 py-1 rounded-lg text-[11px] font-bold border transition-all ${
+                                            isAssigned
+                                              ? 'bg-amber-500 text-slate-950 border-amber-400 font-black'
+                                              : 'bg-slate-900 text-slate-400 border-slate-800 hover:text-white'
+                                          }`}
+                                        >
+                                          {isAssigned ? '✓ ' : '+ '}
+                                          {tp.user?.name || tp.userId}
+                                        </button>
+                                      );
+                                    })}
+                                  </div>
+                                );
+                              })()}
                             </div>
 
                             {/* Group Standings Table */}
@@ -3180,7 +3573,6 @@ export const OrganizerPanel: React.FC<OrganizerPanelProps> = ({ user }) => {
                                           <option value="Waiting">Waiting</option>
                                           <option value="Qualified">Qualified</option>
                                           <option value="Eliminated">Eliminated</option>
-                                          <option value="Champion">Champion</option>
                                         </select>
                                       </td>
                                     </tr>
@@ -3557,6 +3949,135 @@ export const OrganizerPanel: React.FC<OrganizerPanelProps> = ({ user }) => {
         )
       )}
 
+      {/* ADD CO-ORGANIZER MODAL */}
+      {showAddCoOrgModal && activeTournament && (
+        <div className="fixed inset-0 z-50 bg-slate-950/80 backdrop-blur-md flex items-center justify-center p-4">
+          <div className="bg-slate-900 border border-slate-750 text-slate-100 rounded-3xl p-6 max-w-md w-full space-y-5 shadow-2xl">
+            <div className="flex items-center justify-between border-b border-slate-800 pb-3">
+              <div className="flex items-center gap-2.5">
+                <div className="w-9 h-9 rounded-xl bg-amber-500/20 border border-amber-500/30 flex items-center justify-center text-amber-400">
+                  <UserPlus className="w-5 h-5" />
+                </div>
+                <div>
+                  <h3 className="text-base font-extrabold text-white">Add Co-Organizer</h3>
+                  <p className="text-[11px] text-slate-400">Grant an approved organizer management access</p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => {
+                  setShowAddCoOrgModal(false);
+                  setCoOrgLookupValue('');
+                  setCoOrgLookupError(null);
+                }}
+                className="p-1.5 text-slate-400 hover:text-white rounded-xl hover:bg-slate-800 transition-colors"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <form onSubmit={handleAddCoOrganizer} className="space-y-4">
+              <div>
+                <label className="text-xs font-bold text-slate-300 block mb-2">
+                  Lookup Method
+                </label>
+                <div className="grid grid-cols-2 gap-2">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setCoOrgLookupMethod('email');
+                      setCoOrgLookupError(null);
+                    }}
+                    className={`py-2 px-3 rounded-xl border text-xs font-extrabold flex items-center justify-center gap-1.5 transition-all ${
+                      coOrgLookupMethod === 'email'
+                        ? 'bg-amber-500/20 text-amber-300 border-amber-500/40'
+                        : 'bg-slate-950/60 text-slate-400 border-slate-800 hover:text-white'
+                    }`}
+                  >
+                    <Mail className="w-3.5 h-3.5" />
+                    <span>Email Address</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setCoOrgLookupMethod('telegram');
+                      setCoOrgLookupError(null);
+                    }}
+                    className={`py-2 px-3 rounded-xl border text-xs font-extrabold flex items-center justify-center gap-1.5 transition-all ${
+                      coOrgLookupMethod === 'telegram'
+                        ? 'bg-amber-500/20 text-amber-300 border-amber-500/40'
+                        : 'bg-slate-950/60 text-slate-400 border-slate-800 hover:text-white'
+                    }`}
+                  >
+                    <Send className="w-3.5 h-3.5" />
+                    <span>Telegram Username</span>
+                  </button>
+                </div>
+              </div>
+
+              <div>
+                <label className="text-xs font-bold text-slate-300 block mb-1">
+                  {coOrgLookupMethod === 'email' ? 'Organizer Email' : 'Organizer Telegram Username'}
+                </label>
+                <input
+                  type={coOrgLookupMethod === 'email' ? 'email' : 'text'}
+                  value={coOrgLookupValue}
+                  onChange={(e) => {
+                    setCoOrgLookupValue(e.target.value);
+                    if (coOrgLookupError) setCoOrgLookupError(null);
+                  }}
+                  placeholder={coOrgLookupMethod === 'email' ? 'organizer@example.com' : '@username'}
+                  className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2.5 text-xs text-white font-medium focus:outline-hidden focus:border-amber-400"
+                  autoFocus
+                />
+                <p className="text-[10px] text-slate-400 mt-1">
+                  Must be registered on Awedadari and approved as an Organizer.
+                </p>
+              </div>
+
+              {coOrgLookupError && (
+                <div className="p-3 bg-rose-500/10 border border-rose-500/30 rounded-xl text-xs text-rose-300 flex items-start gap-2">
+                  <AlertCircle className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" />
+                  <span>{coOrgLookupError}</span>
+                </div>
+              )}
+
+              <div className="flex items-center justify-end gap-2 pt-2 border-t border-slate-800">
+                <button
+                  type="button"
+                  disabled={coOrgLookupLoading}
+                  onClick={() => {
+                    setShowAddCoOrgModal(false);
+                    setCoOrgLookupValue('');
+                    setCoOrgLookupError(null);
+                  }}
+                  className="px-4 py-2 text-xs font-bold text-slate-400 hover:text-white rounded-xl hover:bg-slate-800 transition-colors"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={coOrgLookupLoading || !coOrgLookupValue.trim()}
+                  className="px-5 py-2 bg-amber-500 hover:bg-amber-400 disabled:opacity-50 text-slate-950 font-black text-xs rounded-xl shadow-md transition-all flex items-center gap-1.5"
+                >
+                  {coOrgLookupLoading ? (
+                    <>
+                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                      <span>Verifying...</span>
+                    </>
+                  ) : (
+                    <>
+                      <UserPlus className="w-3.5 h-3.5" />
+                      <span>Add as Co-Organizer</span>
+                    </>
+                  )}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
       {/* CREATED SUCCESS MODAL (Requirement 1) */}
       {createdSuccessModalOpen && (
         <div className="fixed inset-0 z-50 bg-slate-950/80 backdrop-blur-md flex items-center justify-center p-4">
@@ -3901,6 +4422,339 @@ export const OrganizerPanel: React.FC<OrganizerPanelProps> = ({ user }) => {
             >
               OK
             </button>
+          </div>
+        </div>
+      )}
+
+      {/* ADD PLAYER MODAL */}
+      {showAddPlayerModal && activeTournament && (
+        <div className="fixed inset-0 z-50 bg-slate-950/85 backdrop-blur-md flex items-center justify-center p-4">
+          <div className="bg-slate-900 border border-slate-750 text-slate-100 rounded-3xl p-5 sm:p-6 max-w-lg w-full space-y-4 shadow-2xl relative max-h-[90vh] overflow-y-auto">
+            <button
+              onClick={() => {
+                setShowAddPlayerModal(false);
+                resetAddPlayerState();
+              }}
+              className="absolute top-4 right-4 text-slate-400 hover:text-white p-1 rounded-full bg-slate-800 border border-slate-700 transition-colors"
+            >
+              <X className="w-4 h-4" />
+            </button>
+
+            <div className="space-y-1">
+              <h3 className="text-base font-extrabold text-white flex items-center gap-2">
+                <UserPlus className="w-4 h-4 text-emerald-400" />
+                Add Player to Tournament
+              </h3>
+              <p className="text-xs text-slate-400">
+                Register a player for <strong className="text-slate-200">{activeTournament.tournamentName}</strong>
+              </p>
+            </div>
+
+            {/* Mode Switcher Tabs */}
+            <div className="grid grid-cols-2 gap-1.5 p-1 bg-slate-950 border border-slate-800 rounded-2xl text-xs font-bold">
+              <button
+                type="button"
+                onClick={() => {
+                  setAddPlayerMode('existing');
+                  setAddPlayerError(null);
+                }}
+                className={`py-2 px-3 rounded-xl transition-all flex items-center justify-center gap-1.5 ${
+                  addPlayerMode === 'existing'
+                    ? 'bg-emerald-500 text-slate-950 font-black shadow-xs'
+                    : 'text-slate-400 hover:text-slate-200'
+                }`}
+              >
+                <Search className="w-3.5 h-3.5" /> Existing User
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setAddPlayerMode('manual');
+                  setAddPlayerError(null);
+                }}
+                className={`py-2 px-3 rounded-xl transition-all flex items-center justify-center gap-1.5 ${
+                  addPlayerMode === 'manual'
+                    ? 'bg-emerald-500 text-slate-950 font-black shadow-xs'
+                    : 'text-slate-400 hover:text-slate-200'
+                }`}
+              >
+                <UserCheck className="w-3.5 h-3.5" /> New Participant
+              </button>
+            </div>
+
+            {/* OPTION A: Search Existing Awedadari User */}
+            {addPlayerMode === 'existing' && (
+              <div className="space-y-4 pt-1">
+                <form onSubmit={handleSearchExistingUser} className="space-y-3">
+                  <div className="flex items-center gap-3 text-xs font-bold flex-wrap">
+                    <span className="text-slate-400">Search by:</span>
+                    <label className="flex items-center gap-1.5 cursor-pointer text-slate-300 hover:text-white">
+                      <input
+                        type="radio"
+                        name="lookupMethod"
+                        checked={addPlayerLookupMethod === 'phone'}
+                        onChange={() => setAddPlayerLookupMethod('phone')}
+                        className="text-emerald-500 focus:ring-emerald-500 bg-slate-800 border-slate-700"
+                      />
+                      <span>Phone Number</span>
+                    </label>
+                    <label className="flex items-center gap-1.5 cursor-pointer text-slate-300 hover:text-white">
+                      <input
+                        type="radio"
+                        name="lookupMethod"
+                        checked={addPlayerLookupMethod === 'email'}
+                        onChange={() => setAddPlayerLookupMethod('email')}
+                        className="text-emerald-500 focus:ring-emerald-500 bg-slate-800 border-slate-700"
+                      />
+                      <span>Email</span>
+                    </label>
+                    <label className="flex items-center gap-1.5 cursor-pointer text-slate-300 hover:text-white">
+                      <input
+                        type="radio"
+                        name="lookupMethod"
+                        checked={addPlayerLookupMethod === 'telegram'}
+                        onChange={() => setAddPlayerLookupMethod('telegram')}
+                        className="text-emerald-500 focus:ring-emerald-500 bg-slate-800 border-slate-700"
+                      />
+                      <span>Telegram Username</span>
+                    </label>
+                  </div>
+
+                  <div className="flex gap-2">
+                    <input
+                      type={addPlayerLookupMethod === 'phone' ? 'tel' : addPlayerLookupMethod === 'email' ? 'email' : 'text'}
+                      value={addPlayerLookupValue}
+                      onChange={(e) => {
+                        setAddPlayerLookupValue(e.target.value);
+                        setAddPlayerError(null);
+                        setAddPlayerFoundUser(null);
+                        setAddPlayerLookupAttempted(false);
+                      }}
+                      placeholder={
+                        addPlayerLookupMethod === 'phone'
+                          ? 'Enter phone number (e.g. +251 91 123 4567 or 0911234567)'
+                          : addPlayerLookupMethod === 'email'
+                          ? 'Enter player email (e.g. dawit@example.com)'
+                          : 'Enter Telegram username (e.g. @dawit123)'
+                      }
+                      className="w-full bg-slate-950 border border-slate-750 focus:border-emerald-500 rounded-xl px-3.5 py-2.5 text-xs text-white placeholder:text-slate-500 focus:outline-hidden font-mono"
+                    />
+                    <button
+                      type="submit"
+                      disabled={addPlayerLookupLoading || !addPlayerLookupValue.trim()}
+                      className="px-4 py-2.5 bg-emerald-500 hover:bg-emerald-400 disabled:opacity-50 text-slate-950 font-black text-xs rounded-xl transition-all shrink-0 flex items-center gap-1.5 cursor-pointer"
+                    >
+                      {addPlayerLookupLoading ? (
+                        <>
+                          <Loader2 className="w-3.5 h-3.5 animate-spin" /> Searching...
+                        </>
+                      ) : (
+                        <>
+                          <Search className="w-3.5 h-3.5" /> Find User
+                        </>
+                      )}
+                    </button>
+                  </div>
+                </form>
+
+                {/* Found User Profile Card */}
+                {addPlayerFoundUser && (
+                  <div className="p-3.5 bg-slate-950 border border-emerald-500/40 rounded-2xl space-y-3 animate-in fade-in duration-200">
+                    <div className="flex items-center gap-3">
+                      <img
+                        src={addPlayerFoundUser.profileImage || 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=150'}
+                        alt=""
+                        className="w-12 h-12 rounded-full object-cover border-2 border-emerald-500/60 shrink-0"
+                      />
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center gap-2">
+                          <h4 className="font-extrabold text-white text-sm truncate">
+                            {addPlayerFoundUser.name || 'Awedadari Player'}
+                          </h4>
+                          <span className="px-1.5 py-0.5 bg-emerald-500/10 text-emerald-400 font-bold text-[10px] rounded border border-emerald-500/20">
+                            Verified User
+                          </span>
+                        </div>
+                        <p className="text-xs text-sky-400 font-mono">
+                          @{addPlayerFoundUser.gamertag || addPlayerFoundUser.username || 'gamer'}
+                        </p>
+                        {addPlayerFoundUser.email && (
+                          <p className="text-[11px] text-slate-400 truncate">{addPlayerFoundUser.email}</p>
+                        )}
+                      </div>
+                    </div>
+
+                    <div className="pt-2 border-t border-slate-850 flex items-center justify-between gap-2">
+                      <span className="text-[10px] text-slate-400">
+                        {activeTournament.registrationFee && !activeTournament.registrationFee.toLowerCase().includes('free')
+                          ? 'Registration fee required (Status: Unpaid)'
+                          : 'Free Tournament (Status: Confirmed)'}
+                      </span>
+                      <button
+                        type="button"
+                        disabled={addPlayerSubmitting}
+                        onClick={handleAddExistingUserPlayer}
+                        className="px-4 py-2 bg-emerald-500 hover:bg-emerald-400 disabled:opacity-50 text-slate-950 font-black text-xs rounded-xl transition-all shadow-xs flex items-center gap-1.5 cursor-pointer"
+                      >
+                        {addPlayerSubmitting ? (
+                          <>
+                            <Loader2 className="w-3.5 h-3.5 animate-spin" /> Adding...
+                          </>
+                        ) : (
+                          <>
+                            <UserPlus className="w-3.5 h-3.5" /> + Add Player
+                          </>
+                        )}
+                      </button>
+                    </div>
+                  </div>
+                )}
+
+                {/* Not Found Banner with fallback to Option B */}
+                {addPlayerLookupAttempted && !addPlayerFoundUser && !addPlayerLookupLoading && (
+                  <div className="p-4 bg-slate-950 border border-slate-800 rounded-2xl space-y-3 text-center animate-in fade-in duration-200">
+                    <p className="text-xs text-slate-300 font-medium">
+                      No registered Awedadari user found with that{' '}
+                      {addPlayerLookupMethod === 'phone'
+                        ? 'phone number'
+                        : addPlayerLookupMethod === 'email'
+                        ? 'email address'
+                        : 'Telegram username'}.
+                    </p>
+                    <p className="text-[11px] text-slate-400">
+                      Does this participant not have an account yet? You can add them directly as a tournament participant without creating an account.
+                    </p>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setAddPlayerMode('manual');
+                        if (addPlayerLookupMethod === 'phone') {
+                          setManualPlayerPhone(addPlayerLookupValue.trim());
+                        } else if (addPlayerLookupMethod === 'telegram') {
+                          setManualPlayerTelegram(addPlayerLookupValue.trim());
+                        } else if (addPlayerLookupMethod === 'email') {
+                          setManualPlayerEmail(addPlayerLookupValue.trim());
+                        }
+                        setAddPlayerError(null);
+                      }}
+                      className="px-4 py-2 bg-slate-800 hover:bg-slate-750 text-emerald-400 border border-emerald-500/30 font-bold text-xs rounded-xl transition-colors inline-flex items-center gap-1.5 cursor-pointer"
+                    >
+                      <UserCheck className="w-3.5 h-3.5" /> Add as New Participant
+                    </button>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* OPTION B: Manual Participant Entry (No Awedadari Account Required) */}
+            {addPlayerMode === 'manual' && (
+              <form onSubmit={handleAddManualParticipant} className="space-y-3 pt-1 text-xs">
+                <div className="p-3 bg-purple-500/10 border border-purple-500/20 rounded-2xl text-[11px] text-purple-200/90 leading-relaxed">
+                  <p className="font-bold text-purple-300 flex items-center gap-1.5 mb-0.5">
+                    <Shield className="w-3.5 h-3.5 text-purple-400" /> In-Person / Guest Registration
+                  </p>
+                  No Awedadari account required. The player will receive their own participant slot, check-in code, and bracket placement for this tournament.
+                </div>
+
+                <div className="space-y-1">
+                  <label className="text-slate-300 font-bold flex items-center justify-between">
+                    <span>Full Name <strong className="text-rose-400">*</strong></span>
+                    <span className="text-[10px] text-slate-400 font-normal">Required</span>
+                  </label>
+                  <input
+                    type="text"
+                    required
+                    value={manualPlayerName}
+                    onChange={(e) => {
+                      setManualPlayerName(e.target.value);
+                      if (addPlayerError) setAddPlayerError(null);
+                    }}
+                    placeholder="e.g. Hana Tesfaye"
+                    className="w-full bg-slate-950 border border-slate-750 focus:border-emerald-500 rounded-xl px-3 py-2 text-white placeholder:text-slate-600 focus:outline-hidden"
+                  />
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <div className="space-y-1">
+                    <label className="text-slate-300 font-bold flex items-center justify-between">
+                      <span>Phone Number</span>
+                      <span className="text-[10px] text-slate-500 font-normal">Optional</span>
+                    </label>
+                    <input
+                      type="tel"
+                      value={manualPlayerPhone}
+                      onChange={(e) => setManualPlayerPhone(e.target.value)}
+                      placeholder="e.g. 0912345678"
+                      className="w-full bg-slate-950 border border-slate-750 focus:border-emerald-500 rounded-xl px-3 py-2 text-white placeholder:text-slate-600 focus:outline-hidden"
+                    />
+                  </div>
+
+                  <div className="space-y-1">
+                    <label className="text-slate-300 font-bold flex items-center justify-between">
+                      <span>Telegram Username</span>
+                      <span className="text-[10px] text-slate-500 font-normal">Optional</span>
+                    </label>
+                    <input
+                      type="text"
+                      value={manualPlayerTelegram}
+                      onChange={(e) => setManualPlayerTelegram(e.target.value)}
+                      placeholder="e.g. @hana"
+                      className="w-full bg-slate-950 border border-slate-750 focus:border-emerald-500 rounded-xl px-3 py-2 text-white placeholder:text-slate-600 focus:outline-hidden font-mono"
+                    />
+                  </div>
+                </div>
+
+                <div className="space-y-1">
+                  <label className="text-slate-300 font-bold flex items-center justify-between">
+                    <span>Email Address</span>
+                    <span className="text-[10px] text-slate-500 font-normal">Optional</span>
+                  </label>
+                  <input
+                    type="email"
+                    value={manualPlayerEmail}
+                    onChange={(e) => setManualPlayerEmail(e.target.value)}
+                    placeholder="e.g. hana@example.com"
+                    className="w-full bg-slate-950 border border-slate-750 focus:border-emerald-500 rounded-xl px-3 py-2 text-white placeholder:text-slate-600 focus:outline-hidden"
+                  />
+                </div>
+
+                <div className="pt-2 flex items-center justify-end gap-2.5">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setShowAddPlayerModal(false);
+                      resetAddPlayerState();
+                    }}
+                    className="px-4 py-2 bg-slate-800 hover:bg-slate-750 text-slate-300 font-bold text-xs rounded-xl border border-slate-700 transition-colors cursor-pointer"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="submit"
+                    disabled={addPlayerSubmitting || !manualPlayerName.trim()}
+                    className="px-5 py-2 bg-emerald-500 hover:bg-emerald-400 disabled:opacity-50 text-slate-950 font-black text-xs rounded-xl transition-all shadow-xs flex items-center gap-1.5 cursor-pointer"
+                  >
+                    {addPlayerSubmitting ? (
+                      <>
+                        <Loader2 className="w-3.5 h-3.5 animate-spin" /> Registering...
+                      </>
+                    ) : (
+                      <>
+                        <UserPlus className="w-3.5 h-3.5" /> Register Participant
+                      </>
+                    )}
+                  </button>
+                </div>
+              </form>
+            )}
+
+            {/* Error Message Callout */}
+            {addPlayerError && (
+              <div className="p-3 bg-rose-500/10 border border-rose-500/30 rounded-2xl flex items-center gap-2 text-xs font-semibold text-rose-400 animate-in fade-in duration-150">
+                <AlertCircle className="w-4 h-4 text-rose-400 shrink-0" />
+                <span>{addPlayerError}</span>
+              </div>
+            )}
           </div>
         </div>
       )}

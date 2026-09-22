@@ -1,5 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { db } from '../../services/db';
+import { telegramService } from '../../services/telegramService';
+import { normalizePhoneNumber } from '../../utils/phoneUtils';
 import { User, Tournament, Match } from '../../types';
 import { PaginationControls } from '../common/PaginationControls';
 import {
@@ -23,6 +25,7 @@ import {
   Swords,
   Award,
   Sparkles,
+  Loader2,
 } from 'lucide-react';
 
 interface PlayerProfileProps {
@@ -36,15 +39,6 @@ export const PlayerProfile: React.FC<PlayerProfileProps> = ({ user }) => {
       setTick((t) => t + 1);
     });
   }, []);
-
-  const [gamertag, setGamertag] = useState(user.gamertag || '');
-  const [phoneNumber, setPhoneNumber] = useState(user.phoneNumber || '');
-  const [saved, setSaved] = useState(false);
-
-  React.useEffect(() => {
-    setGamertag(user.gamertag || '');
-    setPhoneNumber(user.phoneNumber || '');
-  }, [user.id, user.gamertag, user.phoneNumber]);
 
   // Profile Image Upload State
   const [uploadingImage, setUploadingImage] = useState(false);
@@ -85,17 +79,6 @@ export const PlayerProfile: React.FC<PlayerProfileProps> = ({ user }) => {
   const orgRequests = db.getOrganizerRequests();
   const userOrgReq = orgRequests.find((r) => r.userId === user.id || r.telegramUserId === (user.telegramUserId || '').replace(/^tg_/, ''));
   const isApproved = db.isApprovedOrganizer(user.telegramUserId || user.id) || user.organizerRequestStatus === 'approved';
-
-  const handleSaveProfile = async (e: React.FormEvent) => {
-    e.preventDefault();
-    await db.updateUser({
-      id: user.id,
-      gamertag: gamertag.trim(),
-      phoneNumber: phoneNumber.trim(),
-    });
-    setSaved(true);
-    setTimeout(() => setSaved(false), 2000);
-  };
 
   const handleImageFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -288,59 +271,42 @@ export const PlayerProfile: React.FC<PlayerProfileProps> = ({ user }) => {
         </div>
       )}
 
-      {/* Requirement 1: Phone Number Input in Credentials Form */}
+      {/* Verified Competitor Identity Card (Read-Only) */}
       <div className="bg-slate-850 border border-slate-750 rounded-2xl p-4 space-y-3">
-        <h3 className="text-xs font-bold text-slate-300 uppercase tracking-wider flex items-center gap-2">
-          <Gamepad2 className="w-4 h-4 text-emerald-400" />
-          Gamertag & Required Contact Info
-        </h3>
+        <div className="flex items-center justify-between">
+          <h3 className="text-xs font-bold text-slate-300 uppercase tracking-wider flex items-center gap-2">
+            <ShieldCheck className="w-4 h-4 text-emerald-400" />
+            Verified Competitor Identity
+          </h3>
+          <span className="text-[10px] text-emerald-400 font-bold bg-emerald-500/10 border border-emerald-500/20 px-2.5 py-0.5 rounded-full flex items-center gap-1">
+            <Check className="w-3 h-3" />
+            Active
+          </span>
+        </div>
 
-        <form onSubmit={handleSaveProfile} className="space-y-3 text-xs">
-          <div>
-            <label className="block text-slate-400 mb-1 font-medium">1v1 Esports Gamertag</label>
-            <div className="relative">
-              <input
-                type="text"
-                value={gamertag}
-                onChange={(e) => setGamertag(e.target.value)}
-                placeholder="e.g. Apex_Striker99, IronFist_Dave"
-                className="w-full bg-slate-900 border border-slate-750 rounded-xl px-3 py-2 text-white placeholder-slate-500 focus:outline-hidden focus:border-blue-500 font-semibold"
-              />
-            </div>
-            <p className="text-[10px] text-slate-500 mt-1">
-              Organizers use your gamertag to set up 1v1 console stations.
-            </p>
-          </div>
-
+        <div className="space-y-3 text-xs">
           <div>
             <label className="block text-slate-400 mb-1 font-medium flex items-center justify-between">
               <span className="flex items-center gap-1.5">
                 <Phone className="w-3.5 h-3.5 text-sky-400" />
                 Phone Number
               </span>
-              <span className="text-rose-400 text-[10px] font-bold uppercase">* Required for Tournaments</span>
+              <span className="text-slate-500 text-[10px] font-mono">Read-Only</span>
             </label>
-            <input
-              type="tel"
-              required
-              value={phoneNumber}
-              onChange={(e) => setPhoneNumber(e.target.value)}
-              placeholder="e.g. +251 91 234 5678 or 0911223344"
-              className="w-full bg-slate-900 border border-slate-750 rounded-xl px-3 py-2 text-white font-mono placeholder-slate-500 focus:outline-hidden focus:border-sky-500"
-            />
+            <div className="w-full bg-slate-900 border border-slate-750 rounded-xl px-3 py-2 text-white font-mono flex items-center justify-between">
+              <span className="font-semibold text-emerald-300">{user.phoneNumber || 'Not provided'}</span>
+              <span className="text-[10px] text-slate-400 font-sans flex items-center gap-1">
+                <CheckCircle2 className="w-3 h-3 text-emerald-400" /> Verified
+              </span>
+            </div>
             <p className="text-[10px] text-slate-500 mt-1">
-              Used by organizers to verify payment proof & send match notifications.
+              Used by tournament organizers to verify payment proof & coordinate match calls.
+            </p>
+            <p className="text-[10px] text-emerald-400/90 flex items-center gap-1 mt-0.5 font-medium">
+              <Shield className="w-3 h-3 shrink-0" /> Private • Never displayed on public leaderboards or standings.
             </p>
           </div>
-
-          <button
-            type="submit"
-            className="w-full py-2.5 bg-blue-600 hover:bg-blue-500 text-white font-bold rounded-xl flex items-center justify-center gap-2 shadow-md transition-all active:scale-98"
-          >
-            {saved ? <Check className="w-4 h-4 text-emerald-300" /> : <Edit3 className="w-4 h-4" />}
-            {saved ? 'Profile Saved Successfully!' : 'Save Profile Changes'}
-          </button>
-        </form>
+        </div>
       </div>
 
       {/* GAME-SPECIFIC COMPETITIVE RATINGS CARD */}

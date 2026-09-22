@@ -155,6 +155,15 @@ export const AdminPortalModal: React.FC<AdminPortalModalProps> = ({ isOpen, onCl
   const [adminTeleNumber, setAdminTeleNumber] = useState('');
   const [adminApprovalError, setAdminApprovalError] = useState('');
 
+  // Confirmation modal state for in-app confirmations (non-blocking for iframes/sandboxes)
+  const [confirmModal, setConfirmModal] = useState<{
+    title: string;
+    message: string;
+    confirmText: string;
+    confirmVariant?: 'danger' | 'warning';
+    onConfirm: () => Promise<void> | void;
+  } | null>(null);
+
   useEffect(() => {
     if (selectedTourForDetail) {
       setAdminTeleName(selectedTourForDetail.telebirrAccountName || selectedTourForDetail.telebirrName || '');
@@ -332,12 +341,52 @@ export const AdminPortalModal: React.FC<AdminPortalModalProps> = ({ isOpen, onCl
     }
   };
 
-  const handleDeleteTournament = async (tId: string, name: string) => {
-    if (window.confirm(`Delete tournament "${name}"? This action cannot be undone.`)) {
-      await db.deleteTournament(tId);
-      setUserActionMsg(`Tournament "${name}" deleted.`);
-      setTimeout(() => setUserActionMsg(''), 4000);
-    }
+  const handleDeleteTournament = (tId: string, name: string) => {
+    setConfirmModal({
+      title: 'Delete Tournament',
+      message: `Permanently delete tournament "${name}"? This action cannot be undone.`,
+      confirmText: 'Delete Tournament',
+      confirmVariant: 'danger',
+      onConfirm: async () => {
+        try {
+          await db.deleteTournament(tId);
+          setUserActionMsg(`Tournament "${name}" deleted.`);
+          if (selectedTourForDetail?.id === tId) {
+            setSelectedTourForDetail(null);
+          }
+          toursPagination.refresh();
+          setTimeout(() => setUserActionMsg(''), 4000);
+        } catch (err: any) {
+          console.error('[ADMIN PORTAL] Failed to delete tournament:', err);
+          setUserActionMsg(`Error deleting tournament: ${err?.message || 'Operation failed'}`);
+          setTimeout(() => setUserActionMsg(''), 6000);
+        }
+      },
+    });
+  };
+
+  const handleRejectTournament = (t: any) => {
+    setConfirmModal({
+      title: 'Reject Tournament',
+      message: `Reject tournament "${t.tournamentName}"? It will not be published to players and will be marked as rejected.`,
+      confirmText: 'Reject Tournament',
+      confirmVariant: 'warning',
+      onConfirm: async () => {
+        try {
+          await db.rejectTournament(t.id);
+          setUserActionMsg(`Rejected tournament "${t.tournamentName}".`);
+          if (selectedTourForDetail?.id === t.id) {
+            setSelectedTourForDetail(null);
+          }
+          toursPagination.refresh();
+          setTimeout(() => setUserActionMsg(''), 4000);
+        } catch (err: any) {
+          console.error('[ADMIN PORTAL] Failed to reject tournament:', err);
+          setUserActionMsg(`Error rejecting tournament: ${err?.message || 'Operation failed'}`);
+          setTimeout(() => setUserActionMsg(''), 6000);
+        }
+      },
+    });
   };
 
   const allUsers = db.getUsers();
@@ -996,13 +1045,7 @@ export const AdminPortalModal: React.FC<AdminPortalModalProps> = ({ isOpen, onCl
                                   Approve & Publish
                                 </button>
                                 <button
-                                  onClick={async () => {
-                                    if (window.confirm(`Reject tournament "${t.tournamentName}"?`)) {
-                                      await db.rejectTournament(t.id);
-                                      setUserActionMsg(`Rejected tournament "${t.tournamentName}".`);
-                                      setTimeout(() => setUserActionMsg(''), 4000);
-                                    }
-                                  }}
+                                  onClick={() => handleRejectTournament(t)}
                                   className="px-2.5 py-1.5 bg-rose-500/20 hover:bg-rose-500/30 text-rose-300 border border-rose-500/30 rounded-xl text-xs font-bold transition-all"
                                 >
                                   Reject
@@ -2008,14 +2051,33 @@ export const AdminPortalModal: React.FC<AdminPortalModalProps> = ({ isOpen, onCl
 
               <div className="pt-2 flex items-center gap-2">
                 {!selectedTourForDetail.isApproved && (
-                  <button
-                    type="button"
-                    onClick={() => handleApproveTournamentWithValidation(selectedTourForDetail)}
-                    className="flex-1 py-2.5 bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-extrabold rounded-xl text-xs flex items-center justify-center gap-1.5 shadow-lg transition-all active:scale-95"
-                  >
-                    <CheckCircle2 className="w-4 h-4" />
-                    Approve & Publish
-                  </button>
+                  <>
+                    <button
+                      type="button"
+                      onClick={() => handleApproveTournamentWithValidation(selectedTourForDetail)}
+                      className="flex-1 py-2.5 bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-extrabold rounded-xl text-xs flex items-center justify-center gap-1.5 shadow-lg transition-all active:scale-95"
+                    >
+                      <CheckCircle2 className="w-4 h-4" />
+                      Approve & Publish
+                    </button>
+                    {!selectedTourForDetail.isRejected && (
+                      <button
+                        type="button"
+                        onClick={() => handleRejectTournament(selectedTourForDetail)}
+                        className="px-3 py-2.5 bg-rose-500/20 hover:bg-rose-500/30 text-rose-300 border border-rose-500/30 font-bold rounded-xl text-xs transition-all active:scale-95"
+                      >
+                        Reject
+                      </button>
+                    )}
+                    <button
+                      type="button"
+                      onClick={() => handleDeleteTournament(selectedTourForDetail.id, selectedTourForDetail.tournamentName)}
+                      className="p-2.5 bg-rose-500/10 hover:bg-rose-500/20 text-rose-400 border border-rose-500/30 font-bold rounded-xl text-xs transition-all active:scale-95"
+                      title="Delete Tournament"
+                    >
+                      <Trash2 className="w-4 h-4" />
+                    </button>
+                  </>
                 )}
                 <button
                   type="button"
@@ -2095,6 +2157,39 @@ export const AdminPortalModal: React.FC<AdminPortalModalProps> = ({ isOpen, onCl
                 >
                   <LogOut className="w-3.5 h-3.5" />
                   Sign Out Now
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+        {/* IN-APP CONFIRMATION MODAL OVERLAY */}
+        {confirmModal && (
+          <div className="fixed inset-0 z-80 bg-slate-950/85 backdrop-blur-md flex items-center justify-center p-4">
+            <div className="bg-slate-900 border border-slate-750 rounded-3xl p-6 max-w-sm w-full space-y-4 shadow-2xl">
+              <h3 className="text-base font-black text-white">{confirmModal.title}</h3>
+              <p className="text-xs text-slate-300 leading-relaxed">{confirmModal.message}</p>
+              <div className="flex gap-2 pt-2">
+                <button
+                  type="button"
+                  onClick={() => setConfirmModal(null)}
+                  className="flex-1 py-2.5 bg-slate-800 hover:bg-slate-750 text-white font-bold rounded-xl text-xs transition-colors"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  onClick={async () => {
+                    const action = confirmModal.onConfirm;
+                    setConfirmModal(null);
+                    await action();
+                  }}
+                  className={`flex-1 py-2.5 font-extrabold rounded-xl text-xs transition-all shadow-md active:scale-95 ${
+                    confirmModal.confirmVariant === 'danger'
+                      ? 'bg-rose-600 hover:bg-rose-500 text-white'
+                      : 'bg-amber-500 hover:bg-amber-400 text-slate-950'
+                  }`}
+                >
+                  {confirmModal.confirmText}
                 </button>
               </div>
             </div>

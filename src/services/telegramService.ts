@@ -51,6 +51,9 @@ declare global {
           notificationOccurred: (type: 'error' | 'success' | 'warning') => void;
           selectionChanged: () => void;
         };
+        requestContact?: (callback: (shared: boolean, response?: any) => void) => void;
+        onEvent?: (eventType: string, eventHandler: (...args: any[]) => void) => void;
+        offEvent?: (eventType: string, eventHandler: (...args: any[]) => void) => void;
         openLink?: (url: string) => void;
         openTelegramLink?: (url: string) => void;
       };
@@ -104,6 +107,100 @@ class TelegramService {
     const hasInitData = typeof webApp.initData === 'string' && webApp.initData.trim().length > 0;
     const hasUser = !!webApp.initDataUnsafe?.user;
     return hasInitData || hasUser || this.isTelegramSDKAvailable;
+  }
+
+  public isRequestContactSupported(): boolean {
+    return typeof window !== 'undefined' && typeof window.Telegram?.WebApp?.requestContact === 'function';
+  }
+
+  /**
+   * Seamlessly requests user's phone contact using Telegram WebApp API.
+   * Resolves with raw or normalized phone number string, or null if cancelled/denied/unsupported.
+   */
+  public async requestContact(): Promise<string | null> {
+    if (typeof window === 'undefined' || !window.Telegram?.WebApp) {
+      return null;
+    }
+
+    const webApp = window.Telegram.WebApp;
+    if (typeof webApp.requestContact !== 'function') {
+      console.warn('Telegram requestContact API not supported in this client version.');
+      return null;
+    }
+
+    return new Promise<string | null>((resolve) => {
+      let resolved = false;
+
+      // Timeout fallback after 25 seconds if user ignores prompt
+      const timer = setTimeout(() => {
+        if (!resolved) {
+          resolved = true;
+          resolve(null);
+        }
+      }, 25000);
+
+      const handleEvent = (eventData: any) => {
+        if (resolved) return;
+        resolved = true;
+        clearTimeout(timer);
+        try {
+          if (webApp.offEvent) {
+            webApp.offEvent('contactRequested', handleEvent);
+          }
+        } catch {}
+
+        if (eventData?.status === 'sent') {
+          const phone = eventData?.responseUnsafe?.contact?.phone_number;
+          if (phone) {
+            resolve(String(phone).trim());
+            return;
+          }
+        }
+        resolve(null);
+      };
+
+      if (webApp.onEvent) {
+        try {
+          webApp.onEvent('contactRequested', handleEvent);
+        } catch {}
+      }
+
+      try {
+        webApp.requestContact((shared: boolean, result?: any) => {
+          if (resolved) return;
+          if (!shared) {
+            resolved = true;
+            clearTimeout(timer);
+            resolve(null);
+            return;
+          }
+
+          const directPhone = result?.responseUnsafe?.contact?.phone_number || result?.phone_number;
+          if (directPhone) {
+            resolved = true;
+            clearTimeout(timer);
+            resolve(String(directPhone).trim());
+            return;
+          }
+
+          // Wait briefly for contactRequested event if not in initial callback
+          setTimeout(() => {
+            if (!resolved) {
+              resolved = true;
+              clearTimeout(timer);
+              resolve(null);
+            }
+          }, 1500);
+        });
+      } catch (err) {
+        console.warn('Error invoking Telegram requestContact:', err);
+        if (!resolved) {
+          resolved = true;
+          clearTimeout(timer);
+          resolve(null);
+        }
+      }
+    });
   }
 
   /**

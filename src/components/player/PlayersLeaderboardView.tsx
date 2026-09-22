@@ -18,8 +18,6 @@ import {
   Info,
   Layers,
   Crown,
-  Phone,
-  Send,
   Gamepad2,
   TrendingUp,
   Activity,
@@ -530,12 +528,9 @@ export const PlayersLeaderboardView: React.FC<PlayersLeaderboardViewProps> = ({
                   </span>
                 </div>
                 <p className="text-xs text-slate-400 truncate">{selectedPlayer.user.name}</p>
-                <p className="text-[11px] text-emerald-300 font-semibold mt-0.5">
-                  📱 Phone: {selectedPlayer.user.phoneNumber || 'Not provided'}
-                </p>
-                {selectedPlayer.user.username && (
-                  <p className="text-[10px] text-slate-500 font-mono">
-                    Telegram: @{selectedPlayer.user.username}
+                {selectedPlayer.user.bio && (
+                  <p className="text-[11px] text-slate-300 italic mt-0.5 line-clamp-2">
+                    "{selectedPlayer.user.bio}"
                   </p>
                 )}
               </div>
@@ -628,39 +623,6 @@ export const PlayersLeaderboardView: React.FC<PlayersLeaderboardViewProps> = ({
                   );
                 })}
               </div>
-            </div>
-
-            {/* Direct Contact Action Buttons */}
-            <div className="grid grid-cols-2 gap-2 pt-1">
-              {selectedPlayer.user.phoneNumber ? (
-                <a
-                  href={`tel:${selectedPlayer.user.phoneNumber}`}
-                  className="py-2 px-3 bg-emerald-500/10 hover:bg-emerald-500/20 border border-emerald-500/30 text-emerald-300 rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 transition-all active:scale-95"
-                >
-                  <Phone className="w-3.5 h-3.5 text-emerald-400" />
-                  Call
-                </a>
-              ) : (
-                <div className="py-2 px-3 bg-slate-800/50 border border-slate-800 text-slate-500 rounded-xl text-xs font-bold flex items-center justify-center gap-1">
-                  <Phone className="w-3.5 h-3.5" /> No Phone
-                </div>
-              )}
-
-              {selectedPlayer.user.username ? (
-                <a
-                  href={`https://t.me/${selectedPlayer.user.username.replace(/^@/, '')}`}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="py-2 px-3 bg-sky-500/10 hover:bg-sky-500/20 border border-sky-500/30 text-sky-300 rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 transition-all active:scale-95"
-                >
-                  <Send className="w-3.5 h-3.5 text-sky-400" />
-                  Telegram
-                </a>
-              ) : (
-                <div className="py-2 px-3 bg-slate-800/50 border border-slate-800 text-slate-500 rounded-xl text-xs font-bold flex items-center justify-center gap-1">
-                  <Send className="w-3.5 h-3.5" /> No Telegram
-                </div>
-              )}
             </div>
 
             <button

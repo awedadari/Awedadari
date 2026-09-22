@@ -71,12 +71,30 @@ service cloud.firestore {
       );
     }
 
+    function isCoOrganizer(tournamentData) {
+      return isAuthenticated() &&
+        'coOrganizerIds' in tournamentData &&
+        tournamentData.coOrganizerIds is list &&
+        (
+          tournamentData.coOrganizerIds.hasAny([
+            request.auth.uid,
+            'user_' + request.auth.uid,
+            'tg_' + request.auth.uid,
+            'user_tg_' + request.auth.uid
+          ])
+        ) &&
+        isApprovedOrganizer(request.auth.uid);
+    }
+
     function isTournamentOrganizer(tournamentId) {
       return isAuthenticated() && (
         isAdmin() ||
         (
           exists(/databases/$(database)/documents/tournaments/$(tournamentId)) &&
-          isUser(get(/databases/$(database)/documents/tournaments/$(tournamentId)).data.organizerId)
+          (
+            isUser(get(/databases/$(database)/documents/tournaments/$(tournamentId)).data.organizerId) ||
+            isCoOrganizer(get(/databases/$(database)/documents/tournaments/$(tournamentId)).data)
+          )
         )
       );
     }
@@ -91,7 +109,9 @@ service cloud.firestore {
           (!('role' in request.resource.data.keys()) || request.resource.data.role == 'PLAYER') &&
           (!('isApproved' in request.resource.data.keys()) || request.resource.data.isApproved == false) &&
           (!('walletBalance' in request.resource.data.keys()) || request.resource.data.walletBalance == 0) &&
-          (!('organizerRequestStatus' in request.resource.data.keys()) || request.resource.data.organizerRequestStatus == 'none' || request.resource.data.organizerRequestStatus == 'pending')
+          (!('organizerRequestStatus' in request.resource.data.keys()) || request.resource.data.organizerRequestStatus == 'none' || request.resource.data.organizerRequestStatus == 'pending') &&
+          (!('phone' in request.resource.data.keys())) &&
+          (!('phoneNumber' in request.resource.data.keys()))
         )
       );
       allow update: if isAuthenticated() && (
@@ -105,11 +125,25 @@ service cloud.firestore {
             'firebaseAuthUid',
             'telegramUserId',
             'telegramId',
-            'organizerRequestStatus'
+            'organizerRequestStatus',
+            'phone',
+            'phoneNumber'
           ])
         )
       );
       allow delete: if isAdmin();
+
+      // Private subcollection for protected contact/identity information
+      match /private/{docId} {
+        allow read: if isAuthenticated() && (
+          isAdmin() ||
+          isUser(userId)
+        );
+        allow write: if isAuthenticated() && (
+          isAdmin() ||
+          isUser(userId)
+        );
+      }
     }
 
     // 2. APPROVED ORGANIZERS COLLECTION
@@ -166,6 +200,12 @@ service cloud.firestore {
           )
         ) ||
         (
+          // Approved co-organizer can manage tournament, but cannot modify ownership, co-organizers list, approval status, or payment details
+          isCoOrganizer(resource.data) &&
+          request.resource.data.organizerId == resource.data.organizerId &&
+          !request.resource.data.diff(resource.data).affectedKeys().hasAny(['organizerId', 'coOrganizerIds', 'isApproved', 'telebirrName', 'telebirrAccountName', 'telebirrNumber'])
+        ) ||
+        (
           // Allow transactional player count update during registration
           request.resource.data.diff(resource.data).affectedKeys().hasOnly(['registeredPlayersCount'])
         )
@@ -174,6 +214,19 @@ service cloud.firestore {
         isAuthenticated() &&
         isUser(resource.data.organizerId)
       );
+
+      // Private participant contact info (accessible only to tournament organizers & admin)
+      match /privatePlayers/{playerId} {
+        allow read: if isAuthenticated() && isTournamentOrganizer(tournamentId);
+        allow write: if isAuthenticated() && (
+          isTournamentOrganizer(tournamentId) ||
+          isUser(playerId) ||
+          playerId == request.auth.uid ||
+          playerId == ('user_' + request.auth.uid) ||
+          playerId == (tournamentId + '_' + request.auth.uid) ||
+          playerId == (tournamentId + '_user_' + request.auth.uid)
+        );
+      }
     }
 
     // 5. TOURNAMENT PLAYERS COLLECTION
@@ -191,17 +244,20 @@ service cloud.firestore {
             request.resource.data.paymentStatus == 'CONFIRMED'
           ) &&
           (!('playerStatus' in request.resource.data.keys()) || request.resource.data.playerStatus == 'Registered') &&
-          (!('status' in request.resource.data.keys()) || request.resource.data.status == 'Registered')
+          (!('status' in request.resource.data.keys()) || request.resource.data.status == 'Registered') &&
+          (!('phone' in request.resource.data.keys())) &&
+          (!('phoneNumber' in request.resource.data.keys()))
         )
       );
       allow update: if isAuthenticated() && (
         isAdmin() ||
         isTournamentOrganizer(resource.data.tournamentId) ||
         (
+          resource.data.userId != null &&
           isUser(resource.data.userId) &&
-          isUser(request.resource.data.userId) &&
           request.resource.data.userId == resource.data.userId &&
           request.resource.data.tournamentId == resource.data.tournamentId &&
+          !request.resource.data.diff(resource.data).affectedKeys().hasAny(['phone', 'phoneNumber']) &&
           (
             // 1. Player cannot modify payment status or check-in status directly during general updates
             !request.resource.data.diff(resource.data).affectedKeys().hasAny(['paymentStatus', 'isCheckedIn', 'playerStatus', 'status']) ||
@@ -219,7 +275,7 @@ service cloud.firestore {
       allow delete: if isAuthenticated() && (
         isAdmin() ||
         isTournamentOrganizer(resource.data.tournamentId) ||
-        isUser(resource.data.userId)
+        (resource.data.userId != null && isUser(resource.data.userId))
       );
     }
 

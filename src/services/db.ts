@@ -65,6 +65,7 @@ import {
   RegistrationCode,
   RegistrationCodeStatus,
 } from '../types';
+import { normalizePhoneNumber } from '../utils/phoneUtils';
 import {
   INITIAL_USERS,
   INITIAL_TOURNAMENTS,
@@ -197,14 +198,18 @@ export class DatabaseService {
   private tournamentUnsubscribers: (() => void)[] = [];
   private userRegUnsubscribe: (() => void) | null = null;
   private activeUserDocUnsubscribe: (() => void) | null = null;
+  private userPrivateDocUnsubscribe: (() => void) | null = null;
   private organizerWithdrawalsUnsub: (() => void) | null = null;
   private organizerTournamentsUnsub: (() => void) | null = null;
+  private coOrganizerTournamentsUnsub: (() => void) | null = null;
   private adminListeners: (() => void)[] = [];
   private completedTournamentsLoaded: boolean = false;
   private fetchedUserIds: Set<string> = new Set();
   private inFlightUserIds: Set<string> = new Set();
   private pendingUserFetchIds: Set<string> = new Set();
   private userFetchTimeout: any = null;
+  private authoritativeUserPhoneMap: Map<string, string> = new Map();
+  private privateProfileCheckedUserIds: Set<string> = new Set();
 
   constructor() {
     try {
@@ -222,10 +227,14 @@ export class DatabaseService {
           if (cachedUserRaw) {
             const cachedUser = JSON.parse(cachedUserRaw);
             if (cachedUser && cachedUser.id === savedActiveId) {
-              this.fetchedUserMap.set(savedActiveId, cachedUser);
+              // Strip unverified phone from local cache on cold boot;
+              // authoritative Firestore private profile will populate it immediately.
+              const initialUser = { ...cachedUser, phoneNumber: '' };
+              this.fetchedUserMap.set(savedActiveId, initialUser);
               this.rebuildUsers();
             }
           }
+          this.loadUserPrivateProfile(savedActiveId);
           this.queueUserFetch(savedActiveId);
         }
       }
@@ -285,6 +294,7 @@ export class DatabaseService {
       currentRound: typeof data.currentRound === 'number' ? data.currentRound : 1,
       maxRounds: typeof data.maxRounds === 'number' ? data.maxRounds : 3,
       isApproved: data.isApproved !== undefined ? Boolean(data.isApproved) : true,
+      isRejected: data.isRejected !== undefined ? Boolean(data.isRejected) : false,
       registrationFee: data.registrationFee || '50 ETB',
       registrationMethod: (data.registrationMethod as RegistrationMethod) || (data.registrationFee && data.registrationFee !== 'Free' && data.registrationFee !== '0 ETB' && data.registrationFee !== '0' ? 'PAYMENT' : 'OPEN'),
       registeredPlayersCount: typeof data.registeredPlayersCount === 'number' ? data.registeredPlayersCount : undefined,
@@ -296,6 +306,7 @@ export class DatabaseService {
       performanceLabel: data.performanceLabel || 'Performance',
       sessionLabel: data.sessionLabel || 'Match',
       finalStandings: data.finalStandings || [],
+      coOrganizerIds: Array.isArray(data.coOrganizerIds) ? data.coOrganizerIds : [],
       youtubeVideoId: data.youtubeVideoId || undefined,
       youtubeStreamUrl: data.youtubeStreamUrl || undefined,
     };
@@ -308,6 +319,13 @@ export class DatabaseService {
       const saved = localStorage.getItem(`SG_USER_CACHE_${docSnap.id}`);
       if (saved) cached = JSON.parse(saved);
     } catch {}
+
+    const inMemoryUser = this.fetchedUserMap.get(docSnap.id) || this.users.find((u) => u.id === docSnap.id);
+    const isSelf = this.activeUserId && docSnap.id === this.activeUserId;
+    // Canonical private phone is only available for active user from in-memory authoritative private load
+    const userPhone = isSelf
+      ? (this.authoritativeUserPhoneMap.get(docSnap.id) || inMemoryUser?.phoneNumber || '')
+      : '';
 
     return {
       id: docSnap.id,
@@ -325,7 +343,7 @@ export class DatabaseService {
       gamertag: data.gamertag ?? cached.gamertag ?? data.name ?? cached.name,
       favGame: data.favGame ?? cached.favGame ?? 'eFootball 2026',
       venueName: data.venueName ?? cached.venueName,
-      phoneNumber: data.phoneNumber ?? data.phone ?? cached.phoneNumber ?? '',
+      phoneNumber: userPhone,
       bio: data.bio ?? cached.bio ?? '',
       organizerRequestStatus: data.organizerRequestStatus || 'none',
       organizerRequestReason: data.organizerRequestReason || '',
@@ -499,16 +517,29 @@ export class DatabaseService {
       (snapshot) => {
         const newPlayers: TournamentPlayer[] = snapshot.docs.map((docSnap) => {
           const data = docSnap.data();
+          const docId = docSnap.id;
+          const fallbackUid = data.userId || null;
+          const existingPlayer = this.tournamentPlayers.find(
+            (p) => p.tournamentId === tournamentId && (p.id === docId || (fallbackUid && p.userId === fallbackUid))
+          );
           return {
+            id: docId,
             tournamentId: data.tournamentId,
-            userId: data.userId,
+            userId: fallbackUid,
+            name: data.name || '',
+            phoneNumber: existingPlayer?.phoneNumber || '',
+            telegramUsername: data.telegramUsername || '',
+            email: data.email || '',
+            registrationSource: data.registrationSource || (fallbackUid ? 'online' : 'manual'),
             registrationDate: data.joinedAt || data.registrationDate || new Date().toISOString(),
             playerStatus: (data.status || data.playerStatus || 'Registered') as PlayerStatus,
             paymentStatus: (data.paymentStatus || (data.paymentProofUrl ? 'PENDING_APPROVAL' : 'CONFIRMED')) as PaymentStatus,
             paymentProofUrl: data.paymentProofUrl || '',
             paymentSubmittedAt: data.paymentSubmittedAt || data.joinedAt || '',
             seed: data.seed,
-            checkInCode: data.checkInCode || `SG-${data.userId ? data.userId.slice(-4).toUpperCase() : '1001'}`,
+            checkInCode: data.checkInCode || `SG-${fallbackUid ? fallbackUid.slice(-4).toUpperCase() : docId.slice(-4).toUpperCase()}`,
+            registrationMethod: data.registrationMethod,
+            registrationCode: data.registrationCode,
           };
         });
 
@@ -527,6 +558,42 @@ export class DatabaseService {
         this.notify();
       },
       (err) => console.error(`Error listening to tournamentPlayers for ${tournamentId}:`, err)
+    );
+
+    // 1b. Scoped PRIVATE PARTICIPANT CONTACT INFO (Accessible only to tournament organizers & admin)
+    const privPlayersQuery = collection(firestore, 'tournaments', tournamentId, 'privatePlayers');
+    const unsubPrivPlayers = onSnapshot(
+      privPlayersQuery,
+      (snapshot) => {
+        if (!snapshot.empty) {
+          let updatedAny = false;
+          snapshot.docs.forEach((docSnap) => {
+            const privData = docSnap.data();
+            const phone = privData.phoneNumber || privData.phone;
+            if (phone) {
+              const pId = privData.playerId || docSnap.id;
+              const target = this.tournamentPlayers.find(
+                (p) =>
+                  p.tournamentId === tournamentId &&
+                  (p.id === pId ||
+                    p.userId === pId ||
+                    p.userId === privData.userId ||
+                    `${tournamentId}_${p.userId}` === pId)
+              );
+              if (target && target.phoneNumber !== phone) {
+                target.phoneNumber = phone;
+                updatedAny = true;
+              }
+            }
+          });
+          if (updatedAny) {
+            this.notify();
+          }
+        }
+      },
+      () => {
+        // Silently ignore permission errors when regular players view public tournament
+      }
     );
 
     // 2. Scoped MATCHES
@@ -673,6 +740,7 @@ export class DatabaseService {
     this.tournamentUnsubscribers.push(
       unsubTourDoc,
       unsubPlayers,
+      unsubPrivPlayers,
       unsubMatches,
       unsubGroups,
       unsubSessions,
@@ -831,6 +899,69 @@ export class DatabaseService {
   public syncRoleListeners(user: User) {
     if (!user || !user.id) return;
 
+    // 0. Listen to active user's private profile (canonical private contact info)
+    if (!this.userPrivateDocUnsubscribe) {
+      this.userPrivateDocUnsubscribe = onSnapshot(
+        doc(firestore, 'users', user.id, 'private', 'profile'),
+        (snap) => {
+          if (snap.exists()) {
+            const data = snap.data();
+            const rawPhone = data.phoneNumber || data.phone;
+            if (rawPhone) {
+              const normalized = normalizePhoneNumber(rawPhone);
+              this.authoritativeUserPhoneMap.set(user.id, normalized);
+              const activeU = this.users.find((u) => u.id === user.id) || this.fetchedUserMap.get(user.id);
+              if (activeU && activeU.phoneNumber !== normalized) {
+                activeU.phoneNumber = normalized;
+              }
+              try {
+                const cache = localStorage.getItem(`SG_USER_CACHE_${user.id}`);
+                const cObj = cache ? JSON.parse(cache) : {};
+                cObj.phoneNumber = normalized;
+                localStorage.setItem(`SG_USER_CACHE_${user.id}`, JSON.stringify(cObj));
+              } catch {}
+              this.notify();
+            } else {
+              this.authoritativeUserPhoneMap.delete(user.id);
+              const activeU = this.users.find((u) => u.id === user.id) || this.fetchedUserMap.get(user.id);
+              if (activeU && activeU.phoneNumber) {
+                activeU.phoneNumber = '';
+              }
+              try {
+                const cache = localStorage.getItem(`SG_USER_CACHE_${user.id}`);
+                if (cache) {
+                  const cObj = JSON.parse(cache);
+                  if (cObj.phoneNumber) {
+                    delete cObj.phoneNumber;
+                    localStorage.setItem(`SG_USER_CACHE_${user.id}`, JSON.stringify(cObj));
+                  }
+                }
+              } catch {}
+              this.notify();
+            }
+          } else {
+            this.authoritativeUserPhoneMap.delete(user.id);
+            const activeU = this.users.find((u) => u.id === user.id) || this.fetchedUserMap.get(user.id);
+            if (activeU && activeU.phoneNumber) {
+              activeU.phoneNumber = '';
+            }
+            try {
+              const cache = localStorage.getItem(`SG_USER_CACHE_${user.id}`);
+              if (cache) {
+                const cObj = JSON.parse(cache);
+                if (cObj.phoneNumber) {
+                  delete cObj.phoneNumber;
+                  localStorage.setItem(`SG_USER_CACHE_${user.id}`, JSON.stringify(cObj));
+                }
+              }
+            } catch {}
+            this.notify();
+          }
+        },
+        (err) => console.warn('Error listening to user private profile:', err)
+      );
+    }
+
     // 1. Listen to active user's own document
     if (!this.activeUserDocUnsubscribe) {
       this.activeUserDocUnsubscribe = onSnapshot(
@@ -932,11 +1063,32 @@ export class DatabaseService {
         orgTournamentsQuery,
         (snapshot) => {
           const orgTours = snapshot.docs.map((docSnap) => this.mapTournamentDoc(docSnap));
-          this.organizerTournamentsMap = new Map(orgTours.map((t) => [t.id, t]));
+          // Merge owned tournaments
+          orgTours.forEach((t) => this.organizerTournamentsMap.set(t.id, t));
           this.rebuildTournaments();
           this.notify();
         },
         (err) => console.warn('Error listening to organizer tournaments:', err)
+      );
+    }
+
+    // 5. Co-organizer listener for tournaments where user is assigned as co-organizer
+    if (user.role === 'ORGANIZER' && !this.coOrganizerTournamentsUnsub) {
+      const coOrgTournamentsQuery = query(
+        collection(firestore, 'tournaments'),
+        where('coOrganizerIds', 'array-contains', user.id),
+        limit(50)
+      );
+      this.coOrganizerTournamentsUnsub = onSnapshot(
+        coOrgTournamentsQuery,
+        (snapshot) => {
+          const coTours = snapshot.docs.map((docSnap) => this.mapTournamentDoc(docSnap));
+          // Merge co-organized tournaments
+          coTours.forEach((t) => this.organizerTournamentsMap.set(t.id, t));
+          this.rebuildTournaments();
+          this.notify();
+        },
+        (err) => console.warn('Error listening to co-organizer tournaments:', err)
       );
     }
   }
@@ -1346,14 +1498,29 @@ export class DatabaseService {
     const rawIdStr = String(tgUser.id);
     const cleanTgId = rawIdStr.replace(/^user_tg_/, '').replace(/^user_/, '').replace(/^tg_/, '').trim();
     const isApproved = this.isApprovedOrganizer(cleanTgId);
+    const newUserId = `user_tg_${cleanTgId}`;
 
-    const existingUser = this.users.find(
+    let existingUser = this.users.find(
       (u) =>
         u.telegramUserId === cleanTgId ||
         u.telegramUserId === `tg_${cleanTgId}` ||
         u.id === `user_tg_${cleanTgId}` ||
         u.id === `user_${cleanTgId}`
     );
+    if (!existingUser) {
+      existingUser = this.fetchedUserMap.get(newUserId) || this.fetchedUserMap.get(`user_${cleanTgId}`);
+    }
+    if (!existingUser) {
+      try {
+        const cachedRaw = localStorage.getItem(`SG_USER_CACHE_${newUserId}`) || localStorage.getItem(`SG_USER_CACHE_user_${cleanTgId}`);
+        if (cachedRaw) {
+          const c = JSON.parse(cachedRaw);
+          if (c && (c.id === newUserId || c.id === `user_${cleanTgId}`)) {
+            existingUser = c;
+          }
+        }
+      } catch {}
+    }
 
     if (existingUser) {
       // If user is already approved as an organizer, preserve their existing perspective (ORGANIZER or PLAYER)
@@ -1418,6 +1585,7 @@ export class DatabaseService {
       } catch {}
       this.mergeUsers([existingUser]);
       this.setActiveUserId(existingUser.id);
+      this.loadUserPrivateProfile(existingUser.id);
       return { isNewUser: false, roleGiven: role };
     } else {
       // Every user is automatically given the role of "PLAYER" unless pre-approved as Organizer.
@@ -1428,7 +1596,6 @@ export class DatabaseService {
         tgUser.photo_url ||
         'https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?w=150&auto=format&fit=crop&q=80';
 
-      const newUserId = `user_tg_${cleanTgId}`;
       const newUserDoc = {
         telegramId: `tg_${cleanTgId}`,
         name: fullName,
@@ -1452,6 +1619,7 @@ export class DatabaseService {
         role: role,
         gamertag: tgUser.username ? `@${tgUser.username}` : fullName,
         favGame: 'eFootball 2026',
+        phoneNumber: '',
       };
 
       try {
@@ -1459,11 +1627,12 @@ export class DatabaseService {
       } catch {}
       this.mergeUsers([newUser]);
 
-      setDoc(doc(firestore, 'users', newUserId), newUserDoc).catch((err) =>
+      setDoc(doc(firestore, 'users', newUserId), newUserDoc, { merge: true }).catch((err) =>
         console.error('Failed to create new Telegram user in Firestore:', err)
       );
 
       this.setActiveUserId(newUserId);
+      this.loadUserPrivateProfile(newUserId);
       return { isNewUser: true, roleGiven: role };
     }
   }
@@ -1474,7 +1643,18 @@ export class DatabaseService {
     
     // Check if user is an approved organizer (unlikely for new google users, but honors approval records if mapped)
     const isApproved = this.isApprovedOrganizer(googleUid);
-    const existingUser = this.users.find((u) => u.id === newUserId) || this.fetchedUserMap.get(newUserId);
+    let existingUser = this.users.find((u) => u.id === newUserId) || this.fetchedUserMap.get(newUserId);
+    if (!existingUser) {
+      try {
+        const cachedRaw = localStorage.getItem(`SG_USER_CACHE_${newUserId}`);
+        if (cachedRaw) {
+          const c = JSON.parse(cachedRaw);
+          if (c && c.id === newUserId) {
+            existingUser = c;
+          }
+        }
+      } catch {}
+    }
 
     if (existingUser) {
       let role: UserRole = existingUser.role;
@@ -1520,6 +1700,7 @@ export class DatabaseService {
       } catch {}
       this.mergeUsers([existingUser]);
       this.setActiveUserId(existingUser.id);
+      this.loadUserPrivateProfile(existingUser.id);
       return { isNewUser: false, roleGiven: role };
     } else {
       const role: UserRole = isApproved ? 'ORGANIZER' : 'PLAYER';
@@ -1550,6 +1731,7 @@ export class DatabaseService {
         role: role,
         gamertag: displayName,
         favGame: 'eFootball 2026',
+        phoneNumber: '',
       };
 
       try {
@@ -1557,11 +1739,12 @@ export class DatabaseService {
       } catch {}
       this.mergeUsers([newUser]);
 
-      setDoc(doc(firestore, 'users', newUserId), newUserDoc).catch((err) =>
+      setDoc(doc(firestore, 'users', newUserId), newUserDoc, { merge: true }).catch((err) =>
         console.error('Failed to create new Google user in Firestore:', err)
       );
 
       this.setActiveUserId(newUserId);
+      this.loadUserPrivateProfile(newUserId);
       return { isNewUser: true, roleGiven: role };
     }
   }
@@ -1591,6 +1774,8 @@ export class DatabaseService {
           if (cachedRaw) {
             const cached = JSON.parse(cachedRaw);
             if (cached && cached.id === this.activeUserId) {
+              // Strip unverified phone from cache restore; private Firestore data is authoritative
+              cached.phoneNumber = this.authoritativeUserPhoneMap.get(this.activeUserId) || '';
               this.fetchedUserMap.set(cached.id, cached);
               this.rebuildUsers();
               user = cached;
@@ -1601,6 +1786,17 @@ export class DatabaseService {
     }
     if (!user) {
       this.queueUserFetch(this.activeUserId);
+    }
+    if (this.activeUserId && !this.privateProfileCheckedUserIds.has(this.activeUserId)) {
+      this.loadUserPrivateProfile(this.activeUserId);
+    }
+    if (user) {
+      const authPhone = this.authoritativeUserPhoneMap.get(user.id);
+      if (authPhone !== undefined) {
+        user.phoneNumber = authPhone;
+      } else if (this.privateProfileCheckedUserIds.has(user.id)) {
+        user.phoneNumber = '';
+      }
     }
     return user || null;
   }
@@ -1613,6 +1809,7 @@ export class DatabaseService {
       } catch {
         // ignore
       }
+      this.loadUserPrivateProfile(userId);
     } else {
       try {
         localStorage.removeItem(STORAGE_KEY_ACTIVE_USER);
@@ -1621,6 +1818,57 @@ export class DatabaseService {
       }
     }
     this.notify();
+  }
+
+  public async loadUserPrivateProfile(userId: string): Promise<{ phoneNumber?: string } | null> {
+    if (!userId) return null;
+    this.privateProfileCheckedUserIds.add(userId);
+    try {
+      const privRef = doc(firestore, 'users', userId, 'private', 'profile');
+      const snap = await getDoc(privRef);
+      if (snap.exists()) {
+        const data = snap.data();
+        const phone = data.phoneNumber || data.phone;
+        if (phone) {
+          const normalized = normalizePhoneNumber(phone);
+          this.authoritativeUserPhoneMap.set(userId, normalized);
+          const user = this.users.find((u) => u.id === userId) || this.fetchedUserMap.get(userId);
+          if (user) {
+            user.phoneNumber = normalized;
+            this.notify();
+          }
+          try {
+            const cache = localStorage.getItem(`SG_USER_CACHE_${userId}`);
+            const cObj = cache ? JSON.parse(cache) : {};
+            cObj.phoneNumber = normalized;
+            localStorage.setItem(`SG_USER_CACHE_${userId}`, JSON.stringify(cObj));
+          } catch {}
+          return { phoneNumber: normalized };
+        }
+      }
+
+      // Authoritative private Firestore profile does not contain a phone:
+      // clear/ignore any stale cached phone in state and in localStorage
+      this.authoritativeUserPhoneMap.delete(userId);
+      const user = this.users.find((u) => u.id === userId) || this.fetchedUserMap.get(userId);
+      if (user && user.phoneNumber) {
+        user.phoneNumber = '';
+        this.notify();
+      }
+      try {
+        const cache = localStorage.getItem(`SG_USER_CACHE_${userId}`);
+        if (cache) {
+          const cObj = JSON.parse(cache);
+          if (cObj.phoneNumber) {
+            delete cObj.phoneNumber;
+            localStorage.setItem(`SG_USER_CACHE_${userId}`, JSON.stringify(cObj));
+          }
+        }
+      } catch {}
+    } catch (err) {
+      console.warn('Error fetching private profile for user:', userId, err);
+    }
+    return null;
   }
 
   public logout() {
@@ -1930,6 +2178,28 @@ export class DatabaseService {
         seed: currentPlayers.length + 1,
       });
 
+      // Persist private participant contact info in tournaments/{tournamentId}/privatePlayers/{docId} if user has phone
+      const activeU = this.getActiveUser();
+      const userPhone = activeU?.phoneNumber;
+      if (userPhone) {
+        try {
+          const privPlayerRef = doc(firestore, 'tournaments', tournamentId, 'privatePlayers', docId);
+          await setDoc(
+            privPlayerRef,
+            {
+              tournamentId,
+              playerId: docId,
+              userId,
+              phoneNumber: userPhone,
+              updatedAt: formattedDate,
+            },
+            { merge: true }
+          );
+        } catch (privErr) {
+          console.warn('Could not record participant phone in privatePlayers:', privErr);
+        }
+      }
+
       console.log('PAYMENT_DEBUG: FIRESTORE WRITE SUCCESS', {
         docId,
         tournamentId,
@@ -2024,15 +2294,41 @@ export class DatabaseService {
 
   public getUserById(id: string): User | undefined {
     const found = this.users.find((u) => u.id === id);
-    if (!found && id && !id.startsWith('demo_')) {
+    if (found) return found;
+
+    // Check if id corresponds to a manual participant in tournamentPlayers
+    const manualPlayer = this.tournamentPlayers.find(
+      (tp) => !tp.userId && (tp.id === id || tp.name === id)
+    );
+    if (manualPlayer && manualPlayer.name) {
+      return {
+        id: manualPlayer.id || id,
+        name: manualPlayer.name,
+        username: manualPlayer.telegramUsername ? manualPlayer.telegramUsername.replace(/^@/, '') : manualPlayer.name.toLowerCase().replace(/\s+/g, ''),
+        telegramUserId: '',
+        gamertag: manualPlayer.telegramUsername ? manualPlayer.telegramUsername.replace(/^@/, '') : manualPlayer.name,
+        email: manualPlayer.email || '',
+        phoneNumber: manualPlayer.phoneNumber || '',
+        profileImage: 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=150',
+        role: 'PLAYER',
+        createdAt: manualPlayer.registrationDate,
+      };
+    }
+
+    if (!found && id && !id.startsWith('demo_') && !id.includes('_p_') && !id.includes('_manual_')) {
       this.queueUserFetch(id);
     }
     return found;
   }
 
   public async updateUser(updatedUser: Partial<User> & { id: string }): Promise<void> {
-    const user = this.users.find((u) => u.id === updatedUser.id);
+    const user = this.users.find((u) => u.id === updatedUser.id) || this.fetchedUserMap.get(updatedUser.id);
     let safeUser = { ...updatedUser };
+
+    if (safeUser.phoneNumber) {
+      safeUser.phoneNumber = normalizePhoneNumber(safeUser.phoneNumber);
+      this.authoritativeUserPhoneMap.set(updatedUser.id, safeUser.phoneNumber);
+    }
 
     if (safeUser.profileImage && safeUser.profileImage.startsWith('data:image/')) {
       try {
@@ -2061,6 +2357,31 @@ export class DatabaseService {
       console.warn('LocalStorage save error:', e);
     }
 
+    // Persist private contact info in users/{id}/private/profile
+    if (safeUser.phoneNumber || safeUser.email || safeUser.telegramUserId || safeUser.username) {
+      try {
+        const privateRef = doc(firestore, 'users', updatedUser.id, 'private', 'profile');
+        const privatePayload: Record<string, any> = {
+          updatedAt: new Date().toISOString(),
+        };
+        if (safeUser.phoneNumber) {
+          privatePayload.phoneNumber = safeUser.phoneNumber;
+        }
+        if (safeUser.email) {
+          privatePayload.email = safeUser.email;
+        }
+        if (safeUser.telegramUserId) {
+          privatePayload.telegramUserId = safeUser.telegramUserId;
+        }
+        if (safeUser.username) {
+          privatePayload.username = safeUser.username;
+        }
+        await setDoc(privateRef, privatePayload, { merge: true });
+      } catch (privErr) {
+        console.warn('Could not save to private profile subcollection:', privErr);
+      }
+    }
+
     try {
       const ref = doc(firestore, 'users', updatedUser.id);
       const payload: Record<string, any> = { ...safeUser };
@@ -2068,10 +2389,9 @@ export class DatabaseService {
         payload.profilePhoto = safeUser.profileImage;
         payload.profileImage = safeUser.profileImage;
       }
-      if (safeUser.phoneNumber) {
-        payload.phoneNumber = safeUser.phoneNumber;
-        payload.phone = safeUser.phoneNumber;
-      }
+      // Phone numbers belong exclusively in private/profile; never write to public users doc
+      delete payload.phoneNumber;
+      delete payload.phone;
 
       // Strip protected fields from payload so non-admin user updates pass Firestore security rules
       if (!this.isFirebaseAdminAuthenticated()) {
@@ -2094,15 +2414,15 @@ export class DatabaseService {
 
   public async updatePlayerStatus(
     tournamentId: string,
-    userId: string,
+    playerIdentifier: string,
     status: PlayerStatus
   ): Promise<void> {
-    const docId = `${tournamentId}_${userId}`;
+    const playerObj = this.tournamentPlayers.find(
+      (p) => p.tournamentId === tournamentId && (p.userId === playerIdentifier || p.id === playerIdentifier)
+    );
+    const docId = playerObj?.id || `${tournamentId}_${playerIdentifier}`;
     const playerRef = doc(firestore, 'tournamentPlayers', docId);
 
-    const playerObj = this.tournamentPlayers.find(
-      (p) => p.tournamentId === tournamentId && p.userId === userId
-    );
     if (playerObj) {
       playerObj.playerStatus = status;
       this.notify();
@@ -2129,8 +2449,9 @@ export class DatabaseService {
         p.tournamentId === tournamentId &&
         (p.checkInCode?.toUpperCase() === rawInput ||
          p.checkInCode?.replace(/^SG-/, '').toUpperCase() === cleanCode ||
-         p.userId.toUpperCase() === rawInput ||
-         p.userId.toUpperCase().endsWith(cleanCode))
+         (p.userId && p.userId.toUpperCase() === rawInput) ||
+         (p.userId && p.userId.toUpperCase().endsWith(cleanCode)) ||
+         (p.id && p.id.toUpperCase().endsWith(cleanCode)))
     );
 
     if (!player) {
@@ -2144,31 +2465,46 @@ export class DatabaseService {
       };
     }
 
-    await this.updatePlayerStatus(tournamentId, player.userId, 'Checked In');
-    const user = this.getUserById(player.userId);
+    const playerId = player.userId || player.id || '';
+    await this.updatePlayerStatus(tournamentId, playerId, 'Checked In');
+    const user = playerId ? this.getUserById(playerId) : undefined;
 
-    this.addNotification({
-      userId: player.userId,
-      title: '✅ Check-In Verified!',
-      message: `Your check-in code (${player.checkInCode ? player.checkInCode.replace(/^SG-/, '') : cleanCode}) has been verified by the organizer. You are now checked-in for match calls!`,
-      type: 'tournament',
-      tournamentId,
-    });
+    if (player.userId) {
+      this.addNotification({
+        userId: player.userId,
+        title: '✅ Check-In Verified!',
+        message: `Your check-in code (${player.checkInCode ? player.checkInCode.replace(/^SG-/, '') : cleanCode}) has been verified by the organizer. You are now checked-in for match calls!`,
+        type: 'tournament',
+        tournamentId,
+      });
+    }
 
     return {
       success: true,
-      message: `Successfully checked in player ${user?.name || player.userId}!`,
-      userId: player.userId,
+      message: `Successfully checked in player ${user?.name || player.name || 'Participant'}!`,
+      userId: player.userId || undefined,
     };
   }
 
-  public async removePlayerFromTournament(tournamentId: string, userId: string): Promise<void> {
-    const docId = `${tournamentId}_${userId}`;
+  public async removePlayerFromTournament(tournamentId: string, playerIdentifier: string): Promise<void> {
+    const playerObj = this.tournamentPlayers.find(
+      (p) => p.tournamentId === tournamentId && (p.userId === playerIdentifier || p.id === playerIdentifier)
+    );
+    const docId = playerObj?.id || `${tournamentId}_${playerIdentifier}`;
     const playerRef = doc(firestore, 'tournamentPlayers', docId);
 
     this.tournamentPlayers = this.tournamentPlayers.filter(
-      (p) => !(p.tournamentId === tournamentId && p.userId === userId)
+      (p) => !(p.tournamentId === tournamentId && (p.userId === playerIdentifier || p.id === playerIdentifier))
     );
+
+    const tour = this.getTournamentById(tournamentId);
+    if (tour && typeof tour.registeredPlayersCount === 'number' && tour.registeredPlayersCount > 0) {
+      tour.registeredPlayersCount -= 1;
+      updateDoc(doc(firestore, 'tournaments', tournamentId), {
+        registeredPlayersCount: tour.registeredPlayersCount,
+      }).catch(() => {});
+    }
+
     this.notify();
 
     await deleteDoc(playerRef).catch(() => {});
@@ -2477,7 +2813,11 @@ export class DatabaseService {
 
   public getRecentGames(): string[] {
     return [
+      'Boxing',
       'eFootball',
+      'Crochet',
+      'Hacking',
+      'Cooking',
       'PUBG Mobile',
       'Asphalt Legends Unite',
       'Call of Duty: Mobile',
@@ -2500,17 +2840,555 @@ export class DatabaseService {
 
   // Admin sees tournaments pending approval
   public getPendingTournamentsForAdmin(): Tournament[] {
-    return this.tournaments.filter((t) => t.isApproved === false);
+    return this.tournaments.filter((t) => t.isApproved === false && !t.isRejected);
   }
 
-  // Organizers only manage tournaments they created
+  // Organizers manage tournaments they created or co-organize
   public getOrganizerTournaments(organizerId: string): Tournament[] {
     const cleanId = organizerId.replace(/^user_/, '').replace(/^tg_/, '');
     return this.tournaments.filter((t) => {
+      // 1. Direct creator/owner check
       if (t.organizerId === organizerId) return true;
       const tourOrgClean = (t.organizerId || '').replace(/^user_/, '').replace(/^tg_/, '');
-      return Boolean(cleanId && tourOrgClean && (tourOrgClean === cleanId || tourOrgClean.includes(cleanId) || cleanId.includes(tourOrgClean)));
+      if (cleanId && tourOrgClean && (tourOrgClean === cleanId || tourOrgClean.includes(cleanId) || cleanId.includes(tourOrgClean))) {
+        return true;
+      }
+      // 2. Co-organizer check
+      if (t.coOrganizerIds && Array.isArray(t.coOrganizerIds)) {
+        if (t.coOrganizerIds.includes(organizerId)) return true;
+        if (cleanId && t.coOrganizerIds.some((cid) => {
+          if (cid === organizerId) return true;
+          const cleanCid = cid.replace(/^user_/, '').replace(/^tg_/, '');
+          return cleanCid === cleanId || cleanCid.includes(cleanId) || cleanId.includes(cleanCid);
+        })) {
+          return true;
+        }
+      }
+      return false;
     });
+  }
+
+  public isTournamentOwner(tournament: Tournament, userId: string): boolean {
+    if (!tournament || !userId) return false;
+    if (tournament.organizerId === userId) return true;
+    const cleanUser = userId.replace(/^user_/, '').replace(/^tg_/, '');
+    const cleanOrg = (tournament.organizerId || '').replace(/^user_/, '').replace(/^tg_/, '');
+    return Boolean(cleanUser && cleanOrg && cleanUser === cleanOrg);
+  }
+
+  public isTournamentCoOrganizer(tournament: Tournament, userId: string): boolean {
+    if (!tournament || !userId || !tournament.coOrganizerIds || !Array.isArray(tournament.coOrganizerIds)) return false;
+    if (tournament.coOrganizerIds.includes(userId)) return true;
+    const cleanUser = userId.replace(/^user_/, '').replace(/^tg_/, '');
+    return tournament.coOrganizerIds.some((cid) => {
+      if (cid === userId) return true;
+      const cleanCid = cid.replace(/^user_/, '').replace(/^tg_/, '');
+      return Boolean(cleanUser && cleanCid && cleanUser === cleanCid);
+    });
+  }
+
+  public canManageTournament(tournament: Tournament, userId: string): boolean {
+    return this.isTournamentOwner(tournament, userId) || this.isTournamentCoOrganizer(tournament, userId);
+  }
+
+  public isUserApprovedOrganizer(user: User): boolean {
+    if (!user) return false;
+    if (user.role === 'ORGANIZER' || user.role === 'ADMIN') return true;
+    if (user.organizerRequestStatus === 'approved') return true;
+    if (this.isApprovedOrganizer(user.id)) return true;
+    if (user.telegramUserId && this.isApprovedOrganizer(user.telegramUserId)) return true;
+    if (user.firebaseAuthUid && this.isApprovedOrganizer(user.firebaseAuthUid)) return true;
+    return false;
+  }
+
+  public async isUserApprovedOrganizerAsync(user: User): Promise<boolean> {
+    if (this.isUserApprovedOrganizer(user)) return true;
+    const cleanId = String(user.id).replace(/^user_tg_/, '').replace(/^user_/, '').replace(/^tg_/, '').trim();
+    if (cleanId) {
+      try {
+        const snap = await getDoc(doc(firestore, 'approvedOrganizers', cleanId));
+        if (snap.exists() && snap.data()?.approved !== false) return true;
+      } catch {}
+    }
+    if (user.telegramUserId) {
+      const cleanTg = String(user.telegramUserId).replace(/^user_tg_/, '').replace(/^user_/, '').replace(/^tg_/, '').trim();
+      if (cleanTg) {
+        try {
+          const snap = await getDoc(doc(firestore, 'approvedOrganizers', cleanTg));
+          if (snap.exists() && snap.data()?.approved !== false) return true;
+        } catch {}
+      }
+    }
+    return false;
+  }
+
+  public async findUserByLookup(
+    method: 'phone' | 'email' | 'telegram',
+    value: string,
+    tournamentId?: string
+  ): Promise<User | null> {
+    const trimmed = value.trim();
+    if (!trimmed) return null;
+
+    if (method === 'phone') {
+      const normalizedPhone = normalizePhoneNumber(trimmed);
+      if (!normalizedPhone) return null;
+
+      // 1. Check cached in-memory users
+      const cached = this.users.find(
+        (u) => u.phoneNumber && normalizePhoneNumber(u.phoneNumber) === normalizedPhone
+      );
+      if (cached) return cached;
+
+      // 2. Query authorized backend lookup endpoint
+      try {
+        const token = await auth.currentUser?.getIdToken();
+        const res = await fetch('/api/users/lookup', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            ...(token ? { Authorization: `Bearer ${token}` } : {}),
+            ...(auth.currentUser ? { 'x-user-id': auth.currentUser.uid } : {}),
+          },
+          body: JSON.stringify({
+            method: 'phone',
+            value: normalizedPhone,
+            tournamentId,
+          }),
+        });
+        if (res.ok) {
+          const json = await res.json();
+          if (json.success && json.found && json.user) {
+            const foundUser: User = {
+              id: json.user.id,
+              name: json.user.name || 'Competitor',
+              username: json.user.username || 'user',
+              telegramUserId: json.user.telegramUserId || `tg_${json.user.id}`,
+              gamertag: json.user.gamertag,
+              profileImage: json.user.profileImage || 'https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?w=150',
+              role: json.user.role || 'PLAYER',
+              favGame: json.user.favGame || 'eFootball 2026',
+              phoneNumber: json.user.phoneNumber || normalizedPhone,
+            };
+            this.mergeUsers([foundUser]);
+            return foundUser;
+          }
+        }
+      } catch (err) {
+        console.warn('Backend phone lookup error:', err);
+      }
+
+      // 3. Fallback direct Firestore queries
+      try {
+        const queries = [
+          query(collection(firestore, 'users'), where('phoneNumber', '==', normalizedPhone), limit(1)),
+          query(collection(firestore, 'users'), where('phone', '==', normalizedPhone), limit(1)),
+          query(collection(firestore, 'users'), where('phoneNumber', '==', trimmed), limit(1)),
+        ];
+        for (const q of queries) {
+          const snap = await getDocs(q);
+          if (!snap.empty) {
+            const found = this.mapUserDoc(snap.docs[0]);
+            this.mergeUsers([found]);
+            return found;
+          }
+        }
+      } catch (err) {
+        console.warn('Error querying user by phone:', err);
+      }
+      return null;
+    }
+
+    if (method === 'email') {
+      const emailLower = trimmed.toLowerCase();
+      // 1. Check cached users
+      const cached = this.users.find(
+        (u) => u.email && u.email.toLowerCase() === emailLower
+      );
+      if (cached) return cached;
+
+      // 2. Query Firestore users by email
+      try {
+        const q = query(
+          collection(firestore, 'users'),
+          where('email', '==', emailLower),
+          limit(1)
+        );
+        const snap = await getDocs(q);
+        if (!snap.empty) {
+          const found = this.mapUserDoc(snap.docs[0]);
+          this.mergeUsers([found]);
+          return found;
+        }
+        if (trimmed !== emailLower) {
+          const qOrig = query(
+            collection(firestore, 'users'),
+            where('email', '==', trimmed),
+            limit(1)
+          );
+          const snapOrig = await getDocs(qOrig);
+          if (!snapOrig.empty) {
+            const found = this.mapUserDoc(snapOrig.docs[0]);
+            this.mergeUsers([found]);
+            return found;
+          }
+        }
+      } catch (err) {
+        console.warn('Error querying user by email:', err);
+      }
+
+      // 3. Fallback backend endpoint
+      try {
+        const token = await auth.currentUser?.getIdToken();
+        const res = await fetch('/api/users/lookup', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            ...(token ? { Authorization: `Bearer ${token}` } : {}),
+            ...(auth.currentUser ? { 'x-user-id': auth.currentUser.uid } : {}),
+          },
+          body: JSON.stringify({
+            method: 'email',
+            value: emailLower,
+            tournamentId,
+          }),
+        });
+        if (res.ok) {
+          const json = await res.json();
+          if (json.success && json.found && json.user) {
+            const foundUser: User = {
+              id: json.user.id,
+              name: json.user.name || 'Competitor',
+              username: json.user.username || 'user',
+              telegramUserId: json.user.telegramUserId || `tg_${json.user.id}`,
+              gamertag: json.user.gamertag,
+              profileImage: json.user.profileImage || 'https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?w=150',
+              role: json.user.role || 'PLAYER',
+              favGame: json.user.favGame || 'eFootball 2026',
+              email: json.user.email,
+              phoneNumber: json.user.phoneNumber,
+            };
+            this.mergeUsers([foundUser]);
+            return foundUser;
+          }
+        }
+      } catch {}
+
+      return null;
+    }
+
+    if (method === 'telegram') {
+      const cleanUsername = trimmed.replace(/^@/, '').toLowerCase();
+      // 1. Check cached users
+      const cached = this.users.find((u) => {
+        const uName = (u.username || '').replace(/^@/, '').toLowerCase();
+        const uGamer = (u.gamertag || '').replace(/^@/, '').toLowerCase();
+        const uTg = String(u.telegramUserId || '').replace(/^@/, '').replace(/^tg_/, '').toLowerCase();
+        return uName === cleanUsername || uGamer === cleanUsername || uTg === cleanUsername;
+      });
+      if (cached) return cached;
+
+      // 2. Query Firestore users by username, gamertag, or telegramUserId
+      try {
+        const queries = [
+          query(collection(firestore, 'users'), where('username', '==', cleanUsername), limit(1)),
+          query(collection(firestore, 'users'), where('username', '==', '@' + cleanUsername), limit(1)),
+          query(collection(firestore, 'users'), where('gamertag', '==', cleanUsername), limit(1)),
+          query(collection(firestore, 'users'), where('gamertag', '==', '@' + cleanUsername), limit(1)),
+          query(collection(firestore, 'users'), where('telegramUserId', '==', cleanUsername), limit(1)),
+          query(collection(firestore, 'users'), where('telegramUserId', '==', `tg_${cleanUsername}`), limit(1)),
+        ];
+        for (const q of queries) {
+          const snap = await getDocs(q);
+          if (!snap.empty) {
+            const found = this.mapUserDoc(snap.docs[0]);
+            this.mergeUsers([found]);
+            return found;
+          }
+        }
+      } catch (err) {
+        console.warn('Error querying user by telegram username:', err);
+      }
+
+      // 3. Fallback backend endpoint
+      try {
+        const token = await auth.currentUser?.getIdToken();
+        const res = await fetch('/api/users/lookup', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            ...(token ? { Authorization: `Bearer ${token}` } : {}),
+            ...(auth.currentUser ? { 'x-user-id': auth.currentUser.uid } : {}),
+          },
+          body: JSON.stringify({
+            method: 'telegram',
+            value: cleanUsername,
+            tournamentId,
+          }),
+        });
+        if (res.ok) {
+          const json = await res.json();
+          if (json.success && json.found && json.user) {
+            const foundUser: User = {
+              id: json.user.id,
+              name: json.user.name || 'Competitor',
+              username: json.user.username || cleanUsername || 'user',
+              telegramUserId: json.user.telegramUserId || `tg_${cleanUsername}`,
+              gamertag: json.user.gamertag,
+              profileImage: json.user.profileImage || 'https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?w=150',
+              role: json.user.role || 'PLAYER',
+              favGame: json.user.favGame || 'eFootball 2026',
+              phoneNumber: json.user.phoneNumber,
+              email: json.user.email,
+            };
+            this.mergeUsers([foundUser]);
+            return foundUser;
+          }
+        }
+      } catch {}
+
+      return null;
+    }
+
+    return null;
+  }
+
+  public async addCoOrganizerToTournament(tournamentId: string, coOrgUserId: string): Promise<void> {
+    const tour = this.getTournamentById(tournamentId) || (await this.fetchTournamentById(tournamentId));
+    if (!tour) throw new Error('Tournament not found.');
+
+    const targetUser = this.getUserById(coOrgUserId) || (await this.fetchUserById(coOrgUserId));
+    if (!targetUser) throw new Error('No Awedadari user was found with that email/Telegram username.');
+
+    if (this.isTournamentOwner(tour, targetUser.id)) {
+      throw new Error('This user is already the owner of this tournament.');
+    }
+
+    const isApproved = await this.isUserApprovedOrganizerAsync(targetUser);
+    if (!isApproved) {
+      throw new Error('This user is not an approved organizer yet. They must be approved by an admin before they can manage tournaments.');
+    }
+
+    if (this.isTournamentCoOrganizer(tour, targetUser.id)) {
+      throw new Error('This user is already a co-organizer of this tournament.');
+    }
+
+    const currentList = Array.isArray(tour.coOrganizerIds) ? [...tour.coOrganizerIds] : [];
+    if (!currentList.includes(targetUser.id)) {
+      currentList.push(targetUser.id);
+    }
+    if (targetUser.firebaseAuthUid && !currentList.includes(targetUser.firebaseAuthUid)) {
+      currentList.push(targetUser.firebaseAuthUid);
+    }
+
+    await this.updateTournament(tournamentId, { coOrganizerIds: currentList });
+  }
+
+  public async removeCoOrganizerFromTournament(tournamentId: string, coOrgUserId: string): Promise<void> {
+    const tour = this.getTournamentById(tournamentId) || (await this.fetchTournamentById(tournamentId));
+    if (!tour || !tour.coOrganizerIds) return;
+
+    const targetUser = this.getUserById(coOrgUserId);
+    const idsToRemove = new Set<string>([coOrgUserId]);
+    if (targetUser?.firebaseAuthUid) {
+      idsToRemove.add(targetUser.firebaseAuthUid);
+    }
+    const cleanCoOrg = coOrgUserId.replace(/^user_/, '').replace(/^tg_/, '');
+
+    const newList = tour.coOrganizerIds.filter((id) => {
+      if (idsToRemove.has(id)) return false;
+      const cleanId = id.replace(/^user_/, '').replace(/^tg_/, '');
+      if (cleanCoOrg && cleanId === cleanCoOrg) return false;
+      return true;
+    });
+
+    await this.updateTournament(tournamentId, { coOrganizerIds: newList });
+  }
+
+  public async manuallyAddPlayerToTournament(params: {
+    tournamentId: string;
+    userId?: string;
+    name?: string;
+    phoneNumber?: string;
+    telegramUsername?: string;
+    email?: string;
+  }): Promise<{ success: boolean; message: string; player?: TournamentPlayer }> {
+    const tournament = this.getTournamentById(params.tournamentId);
+    if (!tournament) {
+      throw new Error('Tournament not found.');
+    }
+
+    // Authorization check: Tournament Owner or authorized Co-Organizer
+    const currentUser = auth.currentUser;
+    if (!currentUser) {
+      throw new Error('Authentication required to manage tournament players.');
+    }
+    const isOwner = this.isTournamentOwner(tournament, currentUser.uid);
+    const isCoOrg = this.isTournamentCoOrganizer(tournament, currentUser.uid);
+    const isAdminUser = this.isFirebaseAdminAuthenticated() || currentUser.uid === this.getAdminExpectedUid();
+    if (!isOwner && !isCoOrg && !isAdminUser) {
+      throw new Error('Only the tournament owner or authorized co-organizer can add players.');
+    }
+
+    // Capacity check
+    const currentPlayers = this.getTournamentPlayers(params.tournamentId);
+    if (tournament.maxPlayers && currentPlayers.length >= tournament.maxPlayers) {
+      throw new Error(`Tournament has reached maximum capacity (${tournament.maxPlayers} players).`);
+    }
+
+    // Determine payment status:
+    // Manual addition does NOT automatically mean payment has been made.
+    // If tournament has an entry fee, status is undefined (unpaid).
+    // If free, status is CONFIRMED.
+    const feeRaw = tournament.registrationFee ? tournament.registrationFee.trim().toLowerCase() : '';
+    const isFree = !feeRaw || feeRaw === '0' || feeRaw.includes('free') || feeRaw === '0 etb';
+    const paymentStatus: PaymentStatus | undefined = isFree ? 'CONFIRMED' : undefined;
+
+    const formattedDate = new Date().toISOString();
+    let playerRecord: TournamentPlayer;
+    let docId: string;
+
+    if (params.userId) {
+      // Option A: Existing Awedadari User (resolved by permanent UID)
+      const targetUserId = params.userId.trim();
+      const existingUser = this.getUserById(targetUserId);
+      if (!existingUser) {
+        throw new Error('Selected Awedadari user could not be found.');
+      }
+
+      // Duplicate check for existing user
+      const alreadyRegistered = currentPlayers.some((p) => p.userId === targetUserId);
+      if (alreadyRegistered) {
+        throw new Error(`${existingUser.name || existingUser.gamertag || 'This player'} is already registered for this tournament.`);
+      }
+
+      docId = `${params.tournamentId}_${targetUserId}`;
+      const cleanCheckInCode = `SG-${targetUserId.slice(-4).toUpperCase()}`;
+
+      playerRecord = {
+        id: docId,
+        tournamentId: params.tournamentId,
+        userId: targetUserId,
+        name: existingUser.name || existingUser.gamertag || 'Player',
+        registrationDate: formattedDate,
+        playerStatus: 'Registered',
+        paymentStatus,
+        registrationMethod: 'MANUAL',
+        registrationSource: 'manual',
+        seed: currentPlayers.length + 1,
+        checkInCode: cleanCheckInCode,
+      };
+    } else {
+      // Option B: Non-user participant (no Awedadari account required)
+      const cleanName = (params.name || '').trim();
+      if (!cleanName) {
+        throw new Error('Participant full name is required.');
+      }
+
+      const rawPhone = (params.phoneNumber || '').trim();
+      const cleanPhone = rawPhone ? normalizePhoneNumber(rawPhone) : '';
+      const cleanTg = (params.telegramUsername || '').trim().replace(/^@/, '');
+      const cleanEmail = (params.email || '').trim().toLowerCase();
+
+      // Duplicate check for manual participant
+      const isDuplicate = currentPlayers.some((p) => {
+        if (!p.userId && p.name && p.name.trim().toLowerCase() === cleanName.toLowerCase()) {
+          return true;
+        }
+        if (cleanPhone && p.phoneNumber && normalizePhoneNumber(p.phoneNumber) === cleanPhone) {
+          return true;
+        }
+        if (cleanTg) {
+          const existingTg = (p.telegramUsername || p.user?.gamertag || p.user?.username || '')
+            .replace(/^@/, '')
+            .toLowerCase();
+          if (existingTg === cleanTg.toLowerCase()) {
+            return true;
+          }
+        }
+        if (cleanEmail && (p.email || p.user?.email)?.toLowerCase() === cleanEmail) {
+          return true;
+        }
+        return false;
+      });
+
+      if (isDuplicate) {
+        throw new Error('A participant with matching details is already registered for this tournament.');
+      }
+
+      const randomSuffix = Math.random().toString(36).substring(2, 8);
+      docId = `${params.tournamentId}_p_${Date.now()}_${randomSuffix}`;
+      const randomCodeDigits = Math.floor(1000 + Math.random() * 9000);
+      const cleanCheckInCode = `SG-${randomCodeDigits}`;
+
+      playerRecord = {
+        id: docId,
+        tournamentId: params.tournamentId,
+        userId: null,
+        name: cleanName,
+        phoneNumber: cleanPhone || undefined,
+        telegramUsername: cleanTg ? `@${cleanTg}` : undefined,
+        email: cleanEmail || undefined,
+        registrationDate: formattedDate,
+        playerStatus: 'Registered',
+        paymentStatus,
+        registrationMethod: 'MANUAL',
+        registrationSource: 'manual',
+        seed: currentPlayers.length + 1,
+        checkInCode: cleanCheckInCode,
+      };
+    }
+
+    // Persist to Firestore tournamentPlayers collection without private phone
+    const { phoneNumber: privPhone, ...publicPlayerRecord } = playerRecord;
+    const playerRef = doc(firestore, 'tournamentPlayers', docId);
+    await setDoc(playerRef, {
+      ...publicPlayerRecord,
+      status: 'Registered',
+      joinedAt: formattedDate,
+    });
+
+    // Save private participant contact in tournaments/{tournamentId}/privatePlayers/{docId}
+    if (privPhone) {
+      try {
+        const privPlayerRef = doc(firestore, 'tournaments', params.tournamentId, 'privatePlayers', docId);
+        await setDoc(
+          privPlayerRef,
+          {
+            tournamentId: params.tournamentId,
+            playerId: docId,
+            userId: playerRecord.userId || null,
+            phoneNumber: privPhone,
+            name: playerRecord.name,
+            updatedAt: formattedDate,
+          },
+          { merge: true }
+        );
+      } catch (privErr) {
+        console.warn('Could not save to privatePlayers subcollection:', privErr);
+      }
+    }
+
+    // Update registered players count on tournament record
+    if (typeof tournament.registeredPlayersCount === 'number') {
+      tournament.registeredPlayersCount += 1;
+      updateDoc(doc(firestore, 'tournaments', params.tournamentId), {
+        registeredPlayersCount: tournament.registeredPlayersCount,
+      }).catch(() => {});
+    }
+
+    // Update local state and notify listeners
+    const filtered = this.tournamentPlayers.filter(
+      (p) => p.id !== docId && !(playerRecord.userId && p.userId === playerRecord.userId)
+    );
+    this.tournamentPlayers = [...filtered, playerRecord];
+    this.notify();
+
+    return {
+      success: true,
+      message: `${playerRecord.name || 'Player'} has been successfully added to the tournament.`,
+      player: playerRecord,
+    };
   }
 
   public getTournamentById(id: string): Tournament | undefined {
@@ -2922,7 +3800,7 @@ export class DatabaseService {
     tournamentId: string,
     paymentDetails?: { telebirrName?: string; telebirrNumber?: string }
   ): Promise<void> {
-    const updates: Partial<Tournament> = { isApproved: true };
+    const updates: Partial<Tournament> = { isApproved: true, isRejected: false };
     if (paymentDetails) {
       if (paymentDetails.telebirrNumber !== undefined) {
         updates.telebirrNumber = paymentDetails.telebirrNumber.trim();
@@ -2956,7 +3834,10 @@ export class DatabaseService {
         tournamentId: tour.id,
       });
     }
-    await this.deleteTournament(tournamentId);
+    await this.updateTournament(tournamentId, {
+      isApproved: false,
+      isRejected: true,
+    });
   }
 
   public getTournamentGroups(tournamentId: string): TournamentGroup[] {
@@ -3830,15 +4711,33 @@ export class DatabaseService {
     const seen = new Set<string>();
     const unique: TournamentPlayer[] = [];
     for (const tp of list) {
-      if (!seen.has(tp.userId)) {
-        seen.add(tp.userId);
+      const key = tp.id || tp.userId || `${tp.tournamentId}_${tp.name}`;
+      if (key && !seen.has(key)) {
+        seen.add(key);
         unique.push(tp);
       }
     }
-    return unique.map((tp) => ({
-      ...tp,
-      user: this.getUserById(tp.userId),
-    }));
+    return unique.map((tp) => {
+      let u = tp.userId ? this.getUserById(tp.userId) : (tp.id ? this.getUserById(tp.id) : undefined);
+      if (!u && tp.name) {
+        u = {
+          id: tp.id || `anon_${tp.name}`,
+          name: tp.name,
+          username: tp.telegramUsername ? tp.telegramUsername.replace(/^@/, '') : tp.name.toLowerCase().replace(/\s+/g, ''),
+          telegramUserId: '',
+          gamertag: tp.telegramUsername ? tp.telegramUsername.replace(/^@/, '') : tp.name,
+          email: tp.email || '',
+          phoneNumber: tp.phoneNumber || '',
+          profileImage: 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=150',
+          role: 'PLAYER',
+          createdAt: tp.registrationDate,
+        };
+      }
+      return {
+        ...tp,
+        user: u,
+      };
+    });
   }
 
   public getConfirmedTournamentPlayers(tournamentId: string): (TournamentPlayer & { user?: User })[] {
@@ -4793,9 +5692,16 @@ export class DatabaseService {
       lower.includes('mortal kombat') ||
       lower.includes('street fighter') ||
       lower.includes('smash') ||
-      lower.includes('fighter')
+      lower.includes('fighter') ||
+      lower.includes('boxing')
     ) {
       icon = '🥊';
+    } else if (lower.includes('crochet')) {
+      icon = '🧶';
+    } else if (lower.includes('hack') || lower.includes('cyber') || lower.includes('code') || lower.includes('coding')) {
+      icon = '💻';
+    } else if (lower.includes('cook') || lower.includes('chef') || lower.includes('culinary') || lower.includes('baking')) {
+      icon = '🍳';
     } else if (lower.includes('chess') || lower.includes('checkers')) {
       icon = '♟️';
     } else if (
@@ -4876,7 +5782,11 @@ export class DatabaseService {
 
     // Seed recognized common esports games so player can always filter even before completed events
     const defaults = [
+      { name: 'Boxing', icon: '🥊' },
       { name: 'eFootball', icon: '⚽' },
+      { name: 'Crochet', icon: '🧶' },
+      { name: 'Hacking', icon: '💻' },
+      { name: 'Cooking', icon: '🍳' },
       { name: 'PUBG Mobile', icon: '🎯' },
       { name: 'EA SPORTS FC 26', icon: '⚽' },
       { name: 'Tekken 8', icon: '🥊' },

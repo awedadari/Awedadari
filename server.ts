@@ -314,6 +314,214 @@ async function startServer() {
     }
   });
 
+  // Helper function to normalize Ethiopian & international phone numbers on server
+  function normalizeServerPhone(raw?: string | null): string {
+    if (!raw) return '';
+    let cleaned = raw.trim().replace(/[\s\-().]/g, '');
+    if (cleaned.startsWith('00')) cleaned = '+' + cleaned.slice(2);
+    if (cleaned.startsWith('+')) {
+      return '+' + cleaned.slice(1).replace(/\D/g, '');
+    }
+    const digits = cleaned.replace(/\D/g, '');
+    if (!digits) return '';
+    if (digits.length === 10 && (digits.startsWith('09') || digits.startsWith('07'))) {
+      return `+251${digits.slice(1)}`;
+    }
+    if (digits.length === 9 && (digits.startsWith('9') || digits.startsWith('7'))) {
+      return `+251${digits}`;
+    }
+    if (digits.length === 12 && digits.startsWith('251')) {
+      return `+${digits}`;
+    }
+    return digits.length >= 7 ? `+${digits}` : digits;
+  }
+
+  // Authorized User Lookup Endpoint (for organizer manual addition, check-in, and co-organizer management)
+  app.post('/api/users/lookup', async (req, res) => {
+    try {
+      const { method, value, tournamentId } = req.body || {};
+      if (!method || !value || typeof value !== 'string' || !value.trim()) {
+        return res.status(400).json({ success: false, error: 'Missing required lookup parameters' });
+      }
+
+      const requesterUid = await getAuthUid(req);
+      if (!requesterUid) {
+        return res.status(401).json({ success: false, error: 'Unauthorized: Authentication required' });
+      }
+
+      const isAdminUser = await isServerAdmin(requesterUid);
+      if (!isAdminUser) {
+        if (!tournamentId) {
+          return res.status(403).json({ success: false, error: 'Forbidden: Tournament context or Admin privileges required for user lookup' });
+        }
+        const isAuthorized = await isServerTournamentOrganizer(requesterUid, tournamentId);
+        if (!isAuthorized) {
+          return res.status(403).json({ success: false, error: 'Forbidden: Insufficient permissions for tournament player lookup' });
+        }
+      }
+
+      const db = getAdminFirestore();
+      const rawValue = value.trim();
+
+      if (method === 'phone') {
+        const normalized = normalizeServerPhone(rawValue);
+        if (!normalized) {
+          return res.json({ success: true, found: false, user: null });
+        }
+
+        // 1. Direct search in users collection
+        const phoneQueries = [
+          db.collection('users').where('phoneNumber', '==', normalized).limit(1).get(),
+          db.collection('users').where('phone', '==', normalized).limit(1).get(),
+          db.collection('users').where('phoneNumber', '==', rawValue).limit(1).get(),
+        ];
+        const phoneSnaps = await Promise.all(phoneQueries);
+        for (const snap of phoneSnaps) {
+          if (!snap.empty) {
+            const uDoc = snap.docs[0];
+            const data = uDoc.data();
+            return res.json({
+              success: true,
+              found: true,
+              user: {
+                id: uDoc.id,
+                name: data.name || data.gamertag || 'Competitor',
+                gamertag: data.gamertag || data.name || 'Competitor',
+                profileImage: data.profilePhoto || data.profileImage || 'https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?w=150',
+                role: data.role || 'PLAYER',
+                favGame: data.favGame || 'eFootball 2026',
+                phoneNumber: normalized,
+              },
+            });
+          }
+        }
+
+        // 2. Search in protected private subcollection users/{userId}/private/profile
+        try {
+          const privateSnap = await db
+            .collectionGroup('private')
+            .where('phoneNumber', '==', normalized)
+            .limit(1)
+            .get();
+
+          if (!privateSnap.empty) {
+            const privDoc = privateSnap.docs[0];
+            const userRef = privDoc.ref.parent.parent;
+            if (userRef) {
+              const uSnap = await userRef.get();
+              if (uSnap.exists) {
+                const data = uSnap.data() || {};
+                return res.json({
+                  success: true,
+                  found: true,
+                  user: {
+                    id: uSnap.id,
+                    name: data.name || data.gamertag || 'Competitor',
+                    gamertag: data.gamertag || data.name || 'Competitor',
+                    profileImage: data.profilePhoto || data.profileImage || 'https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?w=150',
+                    role: data.role || 'PLAYER',
+                    favGame: data.favGame || 'eFootball 2026',
+                    phoneNumber: normalized,
+                  },
+                });
+              }
+            }
+          }
+        } catch (cgErr) {
+          console.warn('collectionGroup query notice:', cgErr);
+        }
+
+        return res.json({ success: true, found: false, user: null });
+      }
+
+      if (method === 'email') {
+        const emailLower = rawValue.toLowerCase();
+        const emailSnap = await db.collection('users').where('email', '==', emailLower).limit(1).get();
+        if (!emailSnap.empty) {
+          const uDoc = emailSnap.docs[0];
+          const data = uDoc.data();
+          return res.json({
+            success: true,
+            found: true,
+            user: {
+              id: uDoc.id,
+              name: data.name || data.gamertag || 'Competitor',
+              gamertag: data.gamertag || data.name || 'Competitor',
+              profileImage: data.profilePhoto || data.profileImage || 'https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?w=150',
+              role: data.role || 'PLAYER',
+              favGame: data.favGame || 'eFootball 2026',
+            },
+          });
+        }
+
+        try {
+          const privSnap = await db.collectionGroup('private').where('email', '==', emailLower).limit(1).get();
+          if (!privSnap.empty) {
+            const userRef = privSnap.docs[0].ref.parent.parent;
+            if (userRef) {
+              const uSnap = await userRef.get();
+              if (uSnap.exists) {
+                const data = uSnap.data() || {};
+                return res.json({
+                  success: true,
+                  found: true,
+                  user: {
+                    id: uSnap.id,
+                    name: data.name || data.gamertag || 'Competitor',
+                    gamertag: data.gamertag || data.name || 'Competitor',
+                    profileImage: data.profilePhoto || data.profileImage || 'https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?w=150',
+                    role: data.role || 'PLAYER',
+                    favGame: data.favGame || 'eFootball 2026',
+                  },
+                });
+              }
+            }
+          }
+        } catch {}
+
+        return res.json({ success: true, found: false, user: null });
+      }
+
+      if (method === 'telegram') {
+        const cleanUsername = rawValue.replace(/^@/, '').toLowerCase();
+        const queries = [
+          db.collection('users').where('username', '==', cleanUsername).limit(1).get(),
+          db.collection('users').where('username', '==', '@' + cleanUsername).limit(1).get(),
+          db.collection('users').where('gamertag', '==', cleanUsername).limit(1).get(),
+          db.collection('users').where('gamertag', '==', '@' + cleanUsername).limit(1).get(),
+          db.collection('users').where('telegramUserId', '==', cleanUsername).limit(1).get(),
+          db.collection('users').where('telegramUserId', '==', `tg_${cleanUsername}`).limit(1).get(),
+        ];
+        const tgSnaps = await Promise.all(queries);
+        for (const snap of tgSnaps) {
+          if (!snap.empty) {
+            const uDoc = snap.docs[0];
+            const data = uDoc.data();
+            return res.json({
+              success: true,
+              found: true,
+              user: {
+                id: uDoc.id,
+                name: data.name || data.gamertag || 'Competitor',
+                gamertag: data.gamertag || data.name || 'Competitor',
+                profileImage: data.profilePhoto || data.profileImage || 'https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?w=150',
+                role: data.role || 'PLAYER',
+                favGame: data.favGame || 'eFootball 2026',
+              },
+            });
+          }
+        }
+
+        return res.json({ success: true, found: false, user: null });
+      }
+
+      return res.status(400).json({ success: false, error: 'Unsupported lookup method' });
+    } catch (err: any) {
+      console.error('Error during user lookup:', err);
+      return res.status(500).json({ success: false, error: 'Failed to perform user lookup' });
+    }
+  });
+
   // Server-Authoritative Financial Endpoints
   app.post('/api/financial/confirm-payment', async (req, res) => {
     try {
